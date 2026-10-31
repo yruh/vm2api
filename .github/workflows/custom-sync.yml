@@ -29,6 +29,8 @@ permissions:
 
 env:
   UPSTREAM: dofastted/vm2api
+  # The checkout gains an `upstream` remote; without this gh would target it.
+  GH_REPO: ${{ github.repository }}
   MIN_AGE_MINUTES: '120'
 
 jobs:
