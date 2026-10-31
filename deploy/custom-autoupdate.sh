@@ -37,9 +37,11 @@ env_set() {
   fi
 }
 
-latest="$(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' \
+# "<tag> <release id>": a forced rebuild of the same tag re-creates the release
+# with a new id, which is deployed like a new tag.
+read -r latest release_id < <(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' \
   "https://api.github.com/repos/${REPO}/releases/latest" |
-  python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null)"
+  python3 -c 'import json, sys; r = json.load(sys.stdin); print(r["tag_name"], r["id"])' 2>/dev/null)
 if ! [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   log "cannot read latest release of ${REPO}"
   exit 0
@@ -47,11 +49,13 @@ fi
 current="v$(tr -d '[:space:]' <"${DIR}/VERSION")"
 current_image="$(env_get VM2API_IMAGE)"
 current_image="${current_image:-$UPSTREAM_IMAGE}"
-if [ "$latest" = "$current" ] && [ "$current_image" = "$IMAGE" ]; then
+deployed_id="$(cat "${STATE_DIR}/release-id" 2>/dev/null)"
+if [ "$latest" = "$current" ] && [ "$current_image" = "$IMAGE" ] && [ "$release_id" = "${deployed_id:-$release_id}" ]; then
+  echo "$release_id" >"${STATE_DIR}/release-id"
   rm -f "$PENDING"
   exit 0
 fi
-if [ "$latest" = "$(cat "${STATE_DIR}/failed-tag" 2>/dev/null)" ]; then
+if [ "${latest} ${release_id}" = "$(cat "${STATE_DIR}/failed-tag" 2>/dev/null)" ]; then
   exit 0
 fi
 
@@ -117,6 +121,7 @@ if VM2API_GITHUB_REPO="$REPO" bash "${DIR}/deploy/install.sh" upgrade --yes --ve
   healthy "$latest" "$IMAGE"; then
   rm -f "$PENDING"
   echo "$latest" >"${STATE_DIR}/last-good"
+  echo "$release_id" >"${STATE_DIR}/release-id"
   log "upgrade to ${latest} done"
   prune_images "${IMAGE}:${latest}" "$running_image"
   exit 0
@@ -132,6 +137,6 @@ else
 fi
 # Do not retry the same broken tag every run; a newer release (or deleting
 # custom/failed-tag) retries.
-echo "$latest" >"${STATE_DIR}/failed-tag"
+echo "${latest} ${release_id}" >"${STATE_DIR}/failed-tag"
 rm -f "$PENDING"
 exit 1
