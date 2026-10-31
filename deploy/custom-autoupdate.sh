@@ -109,7 +109,7 @@ healthy() {
 }
 
 running_image="$(docker inspect vm2api --format '{{.Config.Image}}' 2>/dev/null || true)"
-prune_images "$running_image"
+prune_images "$running_image" "${IMAGE}:${latest}"
 
 log "upgrading ${current} (${current_image}) -> ${latest} (${IMAGE})"
 env_set VM2API_IMAGE "$IMAGE"
