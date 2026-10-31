@@ -41,6 +41,12 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     // goes through normal selection.
     home_wait_ms: 20_000,
   }),
+  // seat-order.mjs: new seats prefer the account whose 7d window resets first.
+  weekly_reset_first: Object.freeze({
+    enabled: true,
+    // Resets this close together count as a tie and keep the upstream order.
+    tie_minutes: 60,
+  }),
 })
 
 /** Strategy picks: the home VM was not chosen for something other than plain capacity. */
@@ -60,6 +66,7 @@ export function mergeCustomConfig(raw = {}) {
   return {
     follow: { ...DEFAULT_CUSTOM_CONFIG.follow, ...(src.follow || {}) },
     force_compact: { ...DEFAULT_CUSTOM_CONFIG.force_compact, ...(src.force_compact || {}) },
+    weekly_reset_first: { ...DEFAULT_CUSTOM_CONFIG.weekly_reset_first, ...(src.weekly_reset_first || {}) },
   }
 }
 
