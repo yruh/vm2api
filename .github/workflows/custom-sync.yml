@@ -93,8 +93,8 @@ jobs:
           IMAGE: ${{ steps.meta.outputs.image }}
         run: |
           notes="upstream ${UPSTREAM}@${TAG} + custom patches ($(git rev-parse --short HEAD)). Image: ${IMAGE}:${TAG} (amd64)."
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          gh release create "$TAG" --title "vm2api ${TAG} (custom)" --notes "$notes" --latest --verify-tag
+          gh release delete "$TAG" -R "$GH_REPO" --yes 2>/dev/null || true
+          gh release create "$TAG" -R "$GH_REPO" --title "vm2api ${TAG} (custom)" --notes "$notes" --latest --verify-tag
       - name: report failure
         if: failure()
         env:
@@ -108,9 +108,9 @@ jobs:
 
           Run: ${RUN_URL}
           The server keeps running the last good release until this is fixed."
-          existing=$(gh issue list --state open --search "in:title \"${title}\"" --json number -q '.[0].number')
+          existing=$(gh issue list -R "$GH_REPO" --state open --search "in:title \"${title}\"" --json number -q '.[0].number')
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
+            gh issue comment "$existing" -R "$GH_REPO" --body "$body"
           else
-            gh issue create --title "$title" --body "$body"
+            gh issue create -R "$GH_REPO" --title "$title" --body "$body"
           fi
