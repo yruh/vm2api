@@ -21,6 +21,7 @@ import { ensureWorkerCredential } from '../transport/go-worker-client.mjs'
 import { resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { AttemptCoordinator } from './unit-decision.mjs'
 import { SOFT_COOLDOWN_REASONS } from './pool-scheduler.mjs'
+import { sessionCachePolicy } from '../custom/session-cache.mjs'
 
 // Seat wait for the one-shot repair hop when the rejected hop already spent the deadline.
 const REPAIR_HOP_WAIT_MS = 30_000
@@ -778,6 +779,15 @@ export class FailoverRunner {
           if (elsewhere?.ok) selected = elsewhere
           else await sleepWithSignal(this.config.same_account_retry_delay_ms, signal)
         }
+        if (!selected && attemptNo === 1) {
+          selected = await sessionCachePolicy.selectCompactionHome({
+            scheduler: this.scheduler,
+            stickyRouter: this.stickyRouter,
+            stickyKey,
+            body: requestBody,
+            selectArgs,
+          })
+        }
         if (!selected) selected = await this.scheduler.selectAndReserve({ ...selectArgs, allowWait: true })
       } catch (error) {
         if (error?.code === 'selection_cancelled') {
@@ -820,6 +830,22 @@ export class FailoverRunner {
       if (!selected?.ok) {
         const exhausted = selectionFailure(selected, { excluded, lastPolicy, lastResult, hops: budget.hops })
         return preferLastResult(lastResult, lastPolicy, exhausted, attribution())
+      }
+      if (attemptNo === 1) {
+        const forced = await sessionCachePolicy
+          .forceCompaction({
+            scheduler: this.scheduler,
+            stickyRouter: this.stickyRouter,
+            stickyKey,
+            selected,
+            body: requestBody,
+            selectArgs: { model, pinVmId, ownerScope, keyScope },
+          })
+          .catch(() => null)
+        if (forced) {
+          selected.release?.()
+          return { ...forced, attemptCount: 0, finalState: 'rejected' }
+        }
       }
       repairPending = false
       snapshotPins()
@@ -1019,6 +1045,13 @@ export class FailoverRunner {
           }
           bindAll({ accountId: selected.accountId, vmId: selected.vmId })
           releaseStickySlots()
+          sessionCachePolicy.follow({
+            stickyRouter: this.stickyRouter,
+            selected,
+            bindKeys,
+            deviceKey,
+            sessionId: outboundSessionAccountId === selected.accountId ? outboundSessionId : '',
+          })
           return { ...result, ...attribution(), finalState: 'verified' }
         }
         if (policy.action === 'repair-and-retry' && !repaired && !result?.committed) {
