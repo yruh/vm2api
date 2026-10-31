@@ -108,6 +108,7 @@ import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
 import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createKeySelfHandler, KEY_SELF_PATHS } from './lib/protocol/key-self.mjs'
+import { handleCustomRoute } from './lib/custom/quota-page.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 
 const FEATURES = [
@@ -1113,6 +1114,17 @@ const server = http.createServer(async (req, res) => {
     if (isTelemetryPath(p)) {
       return json(res, 200, telemetryInterceptResponse(p))
     }
+
+    if (
+      await handleCustomRoute(req, res, p, {
+        json,
+        requireAuth,
+        projectRoot: cfg.paths.project,
+        poolScheduler,
+        usersRepo: apiKeyStore?.users || null,
+      })
+    )
+      return
 
     if (
       backupService.isRestoring &&
