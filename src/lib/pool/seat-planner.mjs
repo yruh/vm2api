@@ -21,6 +21,8 @@
  * as taken and cannot jump the queue.
  */
 
+import { weeklyResetFirst } from '../custom/seat-order.mjs'
+
 export const SEAT_STRATEGIES = Object.freeze(['balanced', 'fill'])
 
 /** Float slack so a headroom exactly on the reserve line still opens. */
@@ -136,7 +138,9 @@ export class SeatPlanner {
   }
 
   rank(candidates) {
-    return rankSeatCandidates(candidates, { strategy: this.strategy, openOf: (vmId) => this.openCount(vmId) })
+    return weeklyResetFirst(
+      rankSeatCandidates(candidates, { strategy: this.strategy, openOf: (vmId) => this.openCount(vmId) }),
+    )
   }
 
   /**
