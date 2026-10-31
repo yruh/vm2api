@@ -17,16 +17,23 @@ import { summarizeCodexSlot } from '../vm/codex-slot.mjs'
 import { listQuotaFromHeaders, publicUsageWindow } from '../pool/quota-window.mjs'
 import { accountIdOf } from '../pool/pool-scheduler.mjs'
 
+/** Header samples carry Unix seconds ("1793474400"), /usage samples ISO strings. */
+function isoReset(value) {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(value)
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null
+}
+
 function windowOf(listed, key) {
-  return (
-    publicUsageWindow(
-      listed?.[key] || {
-        utilization: listed?.[`utilization_${key}`],
-        status: listed?.[`status_${key}`],
-        reset: listed?.[`reset_${key}`],
-      },
-    ) || null
+  const window = publicUsageWindow(
+    listed?.[key] || {
+      utilization: listed?.[`utilization_${key}`],
+      status: listed?.[`status_${key}`],
+      reset: listed?.[`reset_${key}`],
+    },
   )
+  return window ? { ...window, resets_at: isoReset(window.resets_at) } : null
 }
 
 export async function quotaView(req, { projectRoot, poolScheduler, usersRepo = null } = {}) {
