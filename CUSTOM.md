@@ -13,9 +13,10 @@ server stays on the last good release.
 - **follow**: a session moved off its pinned VM by a strategy pick (balanced / fill /
   priority-load) re-pins where it was served, so it does not bounce back to an expired cache
   when the old VM's window resets.
-- **force_compact**: a large session about to leave a home VM that is draining (or has
-  `trigger_headroom` or less budget left) gets `prompt is too long: N tokens > M maximum`
-  once; Claude Code compacts. The compaction request goes back to the warm home VM.
+- **force_compact**: once a large session's home VM is draining (or has `trigger_headroom`
+  or less budget left), its next turn, whether it stays on the home or moves off it, gets
+  `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The compaction
+  request goes back to the warm home VM. Smaller sessions keep using the home's last percent.
 
 Config: `src/config/custom.json` (host-mounted, the panel never writes it), all optional:
 

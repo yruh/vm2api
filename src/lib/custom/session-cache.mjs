@@ -6,10 +6,13 @@
  *    moved off its pinned VM, and that the new VM served, re-pins there. The
  *    prompt cache now lives on the new VM; without this the next free turn on
  *    the old home goes back to a cache that has expired by then.
- * 2. force_compact: before a large session leaves a home VM that is about to
- *    run out of 5h/7d budget, answer "prompt is too long" so Claude Code
- *    compacts first. The compaction request itself goes back to the home VM,
- *    where the cache is still warm, and only the short summary moves.
+ * 2. force_compact: once a large session's home VM is about to run out of
+ *    5h/7d budget, answer "prompt is too long" so Claude Code compacts first.
+ *    This fires on the turn that stays on the draining home (seated sessions
+ *    keep running there until upstream rejects, and by then the home is gone)
+ *    as well as on a strategy move away from it. The compaction request itself
+ *    goes back to the home VM, where the cache is still warm, and only the
+ *    short summary moves.
  *
  * Config: src/config/custom.json (KIN_CUSTOM_FILE overrides), re-read when
  * its mtime changes. The panel never writes this file.
@@ -168,15 +171,17 @@ export class SessionCachePolicy {
   }
 
   /**
-   * First hop of a large session about to leave a home that is running out:
-   * the "prompt is too long" result to return instead, or null to proceed.
+   * First hop of a large session whose home is running out, either staying
+   * on it or moved off it by a strategy pick: the "prompt is too long" result
+   * to return instead, or null to proceed.
    */
   async forceCompaction({ scheduler, stickyRouter, stickyKey, selected, body, selectArgs }) {
     const cfg = this.config().force_compact
-    if (!cfg.enabled || !stickyKey || selectArgs?.pinVmId) return null
-    if (!FOLLOW_REASONS.has(selected?.selectionReason)) return null
+    if (!cfg.enabled || !stickyKey || selectArgs?.pinVmId || !selected?.vmId) return null
     const home = stickyRouter?.resolve?.(stickyKey)
-    if (!home?.vmId || home.vmId === selected.vmId) return null
+    if (!home?.vmId) return null
+    const staying = home.vmId === selected.vmId
+    if (!staying && !FOLLOW_REASONS.has(selected.selectionReason)) return null
     if (isCompactionRequest(body)) return null
     const now = Date.now()
     const last = this.forcedAt.get(stickyKey) || 0
@@ -192,7 +197,7 @@ export class SessionCachePolicy {
     })
     let reason = ''
     if (!candidate) {
-      if (cfg.when_home_unavailable) reason = 'home_unavailable'
+      if (cfg.when_home_unavailable && !staying) reason = 'home_unavailable'
     } else if (candidate.draining) {
       reason = 'home_draining'
     } else if (candidate.headroom != null && Number(candidate.headroom) <= Number(cfg.trigger_headroom)) {
@@ -202,7 +207,7 @@ export class SessionCachePolicy {
     this.forcedAt.set(stickyKey, now)
     if (this.forcedAt.size > 4096) this.forcedAt.delete(this.forcedAt.keys().next().value)
     console.log(
-      `[custom] force compaction ${stickyKey} home=${home.vmId} next=${selected.vmId} reason=${reason} est_tokens=${tokens}`,
+      `[custom] force compaction ${stickyKey} home=${home.vmId} next=${staying ? 'home' : selected.vmId} reason=${reason} est_tokens=${tokens}`,
     )
     return promptTooLongError(Math.max(tokens, minTokens + 1), minTokens, {
       reason,
