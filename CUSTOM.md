@@ -18,6 +18,13 @@ server stays on the last good release.
   `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The compaction
   request goes back to the warm home VM. Smaller sessions keep using the home's last percent.
 
+`src/lib/custom/seat-order.mjs`, called from `SeatPlanner.rank` in `src/lib/pool/seat-planner.mjs`:
+
+- **weekly_reset_first**: a new session goes to the account whose 7d window resets first
+  (after priority), so budget that would expire at that reset is used before longer-lived
+  budget. Resets within `tie_minutes` keep the upstream order (occupancy, headroom).
+  Running sessions stay where they are.
+
 Config: `src/config/custom.json` (host-mounted, the panel never writes it), all optional:
 
 ```json
@@ -30,7 +37,8 @@ Config: `src/config/custom.json` (host-mounted, the panel never writes it), all 
     "when_home_unavailable": false,
     "cooldown_ms": 900000,
     "home_wait_ms": 20000
-  }
+  },
+  "weekly_reset_first": { "enabled": true, "tie_minutes": 60 }
 }
 ```
 
