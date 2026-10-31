@@ -185,6 +185,29 @@ test('the compaction turn goes back to the warm home VM', async (t) => {
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
 })
 
+test('a large session staying on its draining home is compacted there, small ones are not', async () => {
+  const policy = new SessionCachePolicy()
+  const args = (stickyKey, body) => ({
+    scheduler: scheduler(),
+    stickyRouter: { resolve: () => HOME },
+    stickyKey,
+    selected: { ...HOME, selectionReason: 'sticky' },
+    body,
+    selectArgs: {},
+  })
+  const forced = await policy.forceCompaction(args('sess:stay', bigBody()))
+  assert.equal(forced.status, 400)
+  assert.equal(forced.body.error.details.reason, 'home_draining')
+  assert.equal(await policy.forceCompaction(args('sess:stay', bigBody())), null)
+  assert.equal(await policy.forceCompaction(args('sess:small', { messages: [{ role: 'user', content: 'hi' }] })), null)
+  assert.equal(await policy.forceCompaction(args('sess:compact', bigBody(COMPACT_TEXT))), null)
+  const healthy = await policy.forceCompaction({
+    ...args('sess:healthy', bigBody()),
+    scheduler: scheduler({ home: { draining: false, headroom: 0.5 } }),
+  })
+  assert.equal(healthy, null)
+})
+
 test('disabled config changes nothing', async () => {
   const policy = new SessionCachePolicy({
     config: () => mergeCustomConfig({ follow: { enabled: false }, force_compact: { enabled: false } }),
