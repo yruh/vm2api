@@ -6,7 +6,9 @@
 # Upgrades with the stock deploy/install.sh (VM2API_GITHUB_REPO + VM2API_IMAGE
 # point it at the fork), only after IDLE_MINUTES without traffic or once an
 # update has waited MAX_DEFER_HOURS. A failed upgrade or health check rolls
-# back to the previous repo/image/tag.
+# back to the previous repo/image/tag. install.sh never deletes old
+# control-plane images (~860 MB each), so this keeps at most the running one
+# and the one before it.
 set -uo pipefail
 
 REPO="${CUSTOM_REPO:-yruh/vm2api}"
@@ -77,6 +79,20 @@ fi
 prev_repo="$UPSTREAM_REPO"
 [ "$current_image" = "$IMAGE" ] && prev_repo="$REPO"
 
+# Remove control-plane images (upstream's and this fork's) except the given refs.
+prune_images() {
+  local ref keep
+  docker images --format '{{.Repository}}:{{.Tag}}' |
+    grep -E "^ghcr\.io/(dofastted|${OWNER})/vm2api:" |
+    while read -r ref; do
+      for keep in "$@"; do
+        [ "$ref" = "$keep" ] && continue 2
+      done
+      docker rmi "$ref" >/dev/null 2>&1 && log "removed old image ${ref}"
+    done
+  docker image prune -f >/dev/null 2>&1 || true
+}
+
 healthy() {
   local port i
   port="$(env_get PORT)"
@@ -92,6 +108,9 @@ healthy() {
   return 1
 }
 
+running_image="$(docker inspect vm2api --format '{{.Config.Image}}' 2>/dev/null || true)"
+prune_images "$running_image"
+
 log "upgrading ${current} (${current_image}) -> ${latest} (${IMAGE})"
 env_set VM2API_IMAGE "$IMAGE"
 if VM2API_GITHUB_REPO="$REPO" bash "${DIR}/deploy/install.sh" upgrade --yes --version "$latest" &&
@@ -99,6 +118,7 @@ if VM2API_GITHUB_REPO="$REPO" bash "${DIR}/deploy/install.sh" upgrade --yes --ve
   rm -f "$PENDING"
   echo "$latest" >"${STATE_DIR}/last-good"
   log "upgrade to ${latest} done"
+  prune_images "${IMAGE}:${latest}" "$running_image"
   exit 0
 fi
 
