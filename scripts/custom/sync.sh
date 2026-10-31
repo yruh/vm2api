@@ -13,7 +13,7 @@ REPO="${GITHUB_REPOSITORY:?}"
 MIN_AGE_MINUTES="${MIN_AGE_MINUTES:-120}"
 FORCE="${FORCE:-false}"
 # Unit test files that cover the scheduler paths the patches touch.
-TESTS="${CUSTOM_TESTS:-custom-session-cache failover-runner pool-scheduler seat-planner sticky-router scheduler-fastpath api-scheduler pool-reservation-release-race schedule-eligibility}"
+TESTS="${CUSTOM_TESTS:-custom-session-cache custom-seat-order failover-runner pool-scheduler seat-planner sticky-router scheduler-fastpath api-scheduler pool-reservation-release-race schedule-eligibility}"
 
 out() { echo "$1" >>"${GITHUB_OUTPUT:-/dev/null}"; }
 fail() {
