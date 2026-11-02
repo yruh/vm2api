@@ -246,6 +246,94 @@ test('disabled config changes nothing', async () => {
   )
 })
 
+function weekly(unit, resetInHours, extra = {}) {
+  const reset = String(Math.floor((Date.now() + resetInHours * 3_600_000) / 1000))
+  return {
+    ...unit,
+    priority: 0,
+    seatCap: 4,
+    draining: false,
+    headroom: 0.9,
+    account: { unified: { headers: { '7d': { utilization: 0.5, reset, status: 'allowed' } } } },
+    ...extra,
+  }
+}
+
+function weeklyScheduler(units) {
+  return {
+    async eligibleCandidates({ onlyVmIds = null, excluded = new Set() } = {}) {
+      return units.filter(
+        (c) => (!onlyVmIds || onlyVmIds.has(c.vmId)) && !excluded.has(c.vmId) && !excluded.has(c.accountId),
+      )
+    },
+    async selectAndReserve({ excluded = new Set() } = {}) {
+      const unit = units.find((c) => !excluded.has(c.vmId))
+      return { ok: true, ...unit, selectionReason: 'sticky', release() {} }
+    },
+    markSuccess() {},
+    markCooldown() {},
+    releaseAccountSessions() {},
+  }
+}
+
+test('a compaction on the later-resetting account moves the session to the earlier one once it has budget', async (t) => {
+  const { sticky, stickyKey } = setup(t, 'rehome')
+  const runner = new FailoverRunner({
+    scheduler: weeklyScheduler([weekly(HOME, 100), weekly(OTHER, 20)]),
+    stickyRouter: sticky,
+  })
+  let servedOn = null
+  const result = await runner.run({
+    requestId: 'rehome',
+    canonicalBody: bigBody(COMPACT_TEXT),
+    model: 'claude-opus-test',
+    stickyKey,
+    applyAttempt: attemptMeta,
+    callAttempt: ({ candidate }) => {
+      servedOn = candidate.vmId
+      return success()
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(servedOn, 'vm-04')
+  const pin = sticky.resolve(stickyKey)
+  assert.equal(pin.vmId, 'vm-01')
+  assert.equal(pin.accountId, 'account-1')
+  assert.equal(pin.sessionId, null)
+})
+
+test('rehome after compaction needs a compaction, a healthy home and a preferred account with budget', async () => {
+  const policy = new SessionCachePolicy()
+  const bound = []
+  const stickyRouter = { bind: (key, payload) => bound.push([key, payload.vmId]) }
+  const rehome = (units, body = bigBody(COMPACT_TEXT)) =>
+    policy.rehomeAfterCompaction({
+      scheduler: weeklyScheduler(units),
+      stickyRouter,
+      selected: HOME,
+      body,
+      bindKeys: ['sess:x'],
+    })
+  assert.equal(await rehome([weekly(HOME, 100), weekly(OTHER, 20)], bigBody()), null)
+  assert.equal(await rehome([weekly(HOME, 100), weekly(OTHER, 20, { headroom: 0.3 })]), null)
+  assert.equal(await rehome([weekly(HOME, 100), weekly(OTHER, 20, { draining: true })]), null)
+  assert.equal(await rehome([weekly(HOME, 20), weekly(OTHER, 100)]), null)
+  assert.equal(await rehome([weekly(HOME, 20.2), weekly(OTHER, 20)]), null)
+  assert.equal(await rehome([weekly(HOME, 100, { draining: true }), weekly(OTHER, 20)]), null)
+  assert.deepEqual(bound, [])
+  assert.equal(await rehome([weekly(HOME, 100), weekly(OTHER, 20)]), 'vm-01')
+  assert.deepEqual(bound, [['sess:x', 'vm-01']])
+  const off = new SessionCachePolicy({ config: () => mergeCustomConfig({ rehome_after_compact: { enabled: false } }) })
+  const disabled = await off.rehomeAfterCompaction({
+    scheduler: weeklyScheduler([weekly(HOME, 100), weekly(OTHER, 20)]),
+    stickyRouter,
+    selected: HOME,
+    body: bigBody(COMPACT_TEXT),
+    bindKeys: ['sess:x'],
+  })
+  assert.equal(disabled, null)
+})
+
 test('compaction requests are recognised by the summary instruction', () => {
   assert.equal(isCompactionRequest(bigBody(COMPACT_TEXT)), true)
   assert.equal(isCompactionRequest({ messages: [{ role: 'user', content: COMPACT_TEXT }] }), true)
