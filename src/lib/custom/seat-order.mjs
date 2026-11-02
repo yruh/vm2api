@@ -20,16 +20,36 @@ function compare(left, right) {
   return left < right ? -1 : 1
 }
 
+function tieMs(cfg) {
+  return Math.max(1, Number(cfg.tie_minutes) || 0) * 60_000
+}
+
+function resetBucket(candidate, cfg, now) {
+  const ms = weeklyResetMs(candidate, now)
+  return Number.isFinite(ms) ? Math.floor(ms / tieMs(cfg)) : ms
+}
+
+/**
+ * Whether `candidate` should be preferred over `other`: higher priority, or
+ * a 7d reset more than `tie_minutes` earlier. Stricter than the bucketed
+ * sort, so two resets a few minutes apart never trade places.
+ */
+export function outranksByWeeklyReset(candidate, other, { config = customConfig, now = Date.now() } = {}) {
+  const cfg = config().weekly_reset_first
+  if (!cfg?.enabled || !candidate || !other) return false
+  const priority = (Number(candidate.priority) || 0) - (Number(other.priority) || 0)
+  if (priority) return priority > 0
+  const mine = weeklyResetMs(candidate, now)
+  if (!Number.isFinite(mine)) return false
+  return weeklyResetMs(other, now) - mine > tieMs(cfg)
+}
+
 /** Re-sort an upstream seat ranking; returns it unchanged when disabled. */
 export function weeklyResetFirst(ranked, { config = customConfig, now = Date.now() } = {}) {
   const cfg = config().weekly_reset_first
   if (!cfg?.enabled || ranked.length < 2) return ranked
-  const bucketMs = Math.max(1, Number(cfg.tie_minutes) || 0) * 60_000
   return ranked
-    .map((candidate, index) => {
-      const ms = weeklyResetMs(candidate, now)
-      return { candidate, index, bucket: Number.isFinite(ms) ? Math.floor(ms / bucketMs) : ms }
-    })
+    .map((candidate, index) => ({ candidate, index, bucket: resetBucket(candidate, cfg, now) }))
     .sort(
       (left, right) =>
         (Number(right.candidate.priority) || 0) - (Number(left.candidate.priority) || 0) ||
