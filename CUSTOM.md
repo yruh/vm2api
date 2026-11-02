@@ -8,7 +8,7 @@ server stays on the last good release.
 
 ## Patches
 
-`src/lib/custom/session-cache.mjs`, called from three spots in `src/lib/pool/failover-runner.mjs`:
+`src/lib/custom/session-cache.mjs`, called from four spots in `src/lib/pool/failover-runner.mjs`:
 
 - **follow**: a session moved off its pinned VM by a strategy pick (balanced / fill /
   priority-load) or a device / family affinity re-pins where it was served, so it does not
@@ -18,6 +18,11 @@ server stays on the last good release.
   or less budget left), its next turn, whether it stays on the home or moves off it, gets
   `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The compaction
   request goes back to the warm home VM. Smaller sessions keep using the home's last percent.
+- **rehome_after_compact**: after a compaction turn (auto, forced or manual `/compact`), if an
+  account that `weekly_reset_first` prefers (higher priority, or 7d reset more than
+  `tie_minutes` earlier) is not draining and has at least `min_headroom` budget left, the
+  session and its device are re-pinned there with a fresh outbound session. The next turn
+  starts on it; only the short summary is written to a cold cache.
 
 `src/lib/custom/seat-order.mjs`, called from `SeatPlanner.rank` in `src/lib/pool/seat-planner.mjs`:
 
@@ -39,7 +44,8 @@ Config: `src/config/custom.json` (host-mounted, the panel never writes it), all 
     "cooldown_ms": 900000,
     "home_wait_ms": 20000
   },
-  "weekly_reset_first": { "enabled": true, "tie_minutes": 60 }
+  "weekly_reset_first": { "enabled": true, "tie_minutes": 60 },
+  "rehome_after_compact": { "enabled": true, "min_headroom": 0.5 }
 }
 ```
 
