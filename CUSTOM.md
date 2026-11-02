@@ -11,8 +11,9 @@ server stays on the last good release.
 `src/lib/custom/session-cache.mjs`, called from three spots in `src/lib/pool/failover-runner.mjs`:
 
 - **follow**: a session moved off its pinned VM by a strategy pick (balanced / fill /
-  priority-load) re-pins where it was served, so it does not bounce back to an expired cache
-  when the old VM's window resets.
+  priority-load) or a device / family affinity re-pins where it was served, so it does not
+  bounce back to an expired cache when the old VM's window resets, its compaction turn goes
+  to the warm VM, and its outbound session stays the same from turn to turn.
 - **force_compact**: once a large session's home VM is draining (or has `trigger_headroom`
   or less budget left), its next turn, whether it stays on the home or moves off it, gets
   `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The compaction
