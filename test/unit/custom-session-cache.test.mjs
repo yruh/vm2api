@@ -104,6 +104,25 @@ test('a balanced move off the pinned VM re-pins the session where it was served'
   assert.equal(pin.sessionId, 'vm-01-session')
 })
 
+test('a device-affinity move off the pinned VM re-pins the session too', async (t) => {
+  const { sticky, stickyKey } = setup(t, 'device')
+  const runner = new FailoverRunner({
+    scheduler: scheduler({ selectionReason: 'device-affinity' }),
+    stickyRouter: sticky,
+  })
+  await runner.run({
+    requestId: 'device',
+    canonicalBody: { model: 'claude-opus-test', messages: [{ role: 'user', content: 'hi' }] },
+    model: 'claude-opus-test',
+    stickyKey,
+    applyAttempt: attemptMeta,
+    callAttempt: () => success(),
+  })
+  const pin = sticky.resolve(stickyKey)
+  assert.equal(pin.vmId, 'vm-01')
+  assert.equal(pin.sessionId, 'vm-01-session')
+})
+
 test('a capacity spill keeps the session pinned at home', async (t) => {
   const { sticky, stickyKey } = setup(t, 'spill')
   const runner = new FailoverRunner({ scheduler: scheduler({ selectionReason: 'sticky-spill' }), stickyRouter: sticky })

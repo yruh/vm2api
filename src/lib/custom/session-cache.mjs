@@ -3,9 +3,11 @@
  * upstream files only carry a few call sites and rebases stay trivial.
  *
  * 1. follow: a session that a strategy pick (balanced / fill / priority-load)
- *    moved off its pinned VM, and that the new VM served, re-pins there. The
- *    prompt cache now lives on the new VM; without this the next free turn on
- *    the old home goes back to a cache that has expired by then.
+ *    or a device / family affinity moved off its pinned VM, and that the new
+ *    VM served, re-pins there. The prompt cache now lives on the new VM;
+ *    without this the next free turn on the old home (or the compaction turn,
+ *    which goes to the pin) lands on a cache that has expired by then, and
+ *    every turn elsewhere gets a fresh outbound session.
  * 2. force_compact: once a large session's home VM is about to run out of
  *    5h/7d budget, answer "prompt is too long" so Claude Code compacts first.
  *    This fires on the turn that stays on the draining home (seated sessions
@@ -49,8 +51,8 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
   }),
 })
 
-/** Strategy picks: the home VM was not chosen for something other than plain capacity. */
-const FOLLOW_REASONS = new Set(['balanced', 'fill', 'priority-load'])
+/** The home VM was not chosen for something other than plain capacity (sticky-spill keeps the pin). */
+const FOLLOW_REASONS = new Set(['balanced', 'fill', 'priority-load', 'device-affinity', 'family-affinity'])
 const COMPACTION_MARKER = 'Your task is to create a detailed summary of the conversation so far'
 
 let cached = { file: '', mtimeMs: -1, config: DEFAULT_CUSTOM_CONFIG }
