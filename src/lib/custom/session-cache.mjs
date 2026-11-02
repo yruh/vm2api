@@ -15,6 +15,10 @@
  *    as well as on a strategy move away from it. The compaction request itself
  *    goes back to the home VM, where the cache is still warm, and only the
  *    short summary moves.
+ * 3. rehome_after_compact: after a compaction turn, when the account new seats
+ *    prefer (7d reset first, seat-order.mjs) has its budget back, re-pin the
+ *    session and its device there. The summary is short, so the move costs
+ *    almost no cache, and spending goes back to the earlier-resetting week.
  *
  * Config: src/config/custom.json (KIN_CUSTOM_FILE overrides), re-read when
  * its mtime changes. The panel never writes this file.
@@ -23,6 +27,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { routingConfigFile } from '../core/config.mjs'
 import { estimatePromptTokens } from '../pool/quota-request-risk.mjs'
+import { outranksByWeeklyReset } from './seat-order.mjs'
 
 export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
   follow: Object.freeze({ enabled: true }),
@@ -49,6 +54,12 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     // Resets this close together count as a tie and keep the upstream order.
     tie_minutes: 60,
   }),
+  rehome_after_compact: Object.freeze({
+    enabled: true,
+    // Remaining budget (configured limit minus usage) the preferred account
+    // needs before a compacted session moves to it.
+    min_headroom: 0.5,
+  }),
 })
 
 /** The home VM was not chosen for something other than plain capacity (sticky-spill keeps the pin). */
@@ -69,6 +80,7 @@ export function mergeCustomConfig(raw = {}) {
     follow: { ...DEFAULT_CUSTOM_CONFIG.follow, ...(src.follow || {}) },
     force_compact: { ...DEFAULT_CUSTOM_CONFIG.force_compact, ...(src.force_compact || {}) },
     weekly_reset_first: { ...DEFAULT_CUSTOM_CONFIG.weekly_reset_first, ...(src.weekly_reset_first || {}) },
+    rehome_after_compact: { ...DEFAULT_CUSTOM_CONFIG.rehome_after_compact, ...(src.rehome_after_compact || {}) },
   }
 }
 
@@ -248,6 +260,62 @@ export class SessionCachePolicy {
     }
     if (moved) console.log(`[custom] follow ${bindKeys[0] || deviceKey} -> ${selected.vmId}`)
     return moved
+  }
+
+  /**
+   * After a verified compaction turn: re-pin the session and its device to
+   * the account new seats prefer, once that one has budget again and the
+   * serving VM does not already rank as high. Returns the new vmId or null.
+   */
+  async rehomeAfterCompaction({
+    scheduler,
+    stickyRouter,
+    selected,
+    body,
+    bindKeys = [],
+    deviceKey = null,
+    selectArgs = {},
+  }) {
+    const cfg = this.config().rehome_after_compact
+    if (!cfg.enabled || !stickyRouter || selectArgs.pinVmId || !selected?.vmId || !isCompactionRequest(body))
+      return null
+    if (typeof scheduler?.eligibleCandidates !== 'function') return null
+    const all = await scheduler.eligibleCandidates({
+      model: selectArgs.model,
+      ownerScope: selectArgs.ownerScope,
+      keyScope: selectArgs.keyScope,
+    })
+    const home = all.find((candidate) => candidate.vmId === selected.vmId)
+    // A draining home is already left on the next turn by normal selection.
+    if (!home || home.draining) return null
+    const now = Date.now()
+    const outranks = (left, right) => outranksByWeeklyReset(left, right, { config: this.config, now })
+    const minHeadroom = Number(cfg.min_headroom) || 0
+    const [target] = all
+      .filter(
+        (candidate) =>
+          candidate.vmId !== home.vmId &&
+          !candidate.draining &&
+          candidate.headroom != null &&
+          Number(candidate.headroom) >= minHeadroom &&
+          scheduler.planner?.canOpen?.(candidate.vmId, candidate.seatCap, candidate.headroom) !== false &&
+          outranks(candidate, home),
+      )
+      .sort(
+        (left, right) =>
+          (outranks(left, right) ? -1 : outranks(right, left) ? 1 : 0) ||
+          Number(right.headroom) - Number(left.headroom),
+      )
+    if (!target) return null
+    const payload = { accountId: target.accountId, vmId: target.vmId }
+    for (const key of bindKeys) {
+      stickyRouter.bind(key, payload, { countHit: false, allowMove: true, replaceSession: true })
+    }
+    if (deviceKey) stickyRouter.bindDeviceAffinity?.(deviceKey, payload)
+    console.log(
+      `[custom] rehome after compaction ${bindKeys[0] || deviceKey} ${home.vmId} -> ${target.vmId} headroom=${target.headroom}`,
+    )
+    return target.vmId
   }
 }
 
