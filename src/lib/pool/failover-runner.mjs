@@ -1105,6 +1105,17 @@ export class FailoverRunner {
             deviceKey,
             sessionId: outboundSessionAccountId === selected.accountId ? outboundSessionId : '',
           })
+          await sessionCachePolicy
+            .rehomeAfterCompaction({
+              scheduler: this.scheduler,
+              stickyRouter: this.stickyRouter,
+              selected,
+              body: requestBody,
+              bindKeys,
+              deviceKey,
+              selectArgs: { model, pinVmId, ownerScope, keyScope },
+            })
+            .catch(() => null)
           return { ...result, ...attribution(), finalState: 'verified' }
         }
         if (policy.action === 'repair-and-retry' && !repaired && !result?.committed) {
