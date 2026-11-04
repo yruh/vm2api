@@ -45,6 +45,9 @@ export function quotaGateOf(quota = {}) {
   return { band: criticalBandOf(quota), overshoot: gateOvershootOf(quota) }
 }
 
+/** The 7d line is hard: overrunning it locks the account for days, so no band and no overshoot. */
+export const WEEKLY_GATE = Object.freeze({ band: 0, overshoot: 0 })
+
 /** Gate keys to stamp onto a tier policy so evaluateAccount sees the configured band/overshoot. */
 export function gatePolicyFields(quota = {}) {
   return { critical_band: criticalBandOf(quota), gate_overshoot: gateOvershootOf(quota) }
