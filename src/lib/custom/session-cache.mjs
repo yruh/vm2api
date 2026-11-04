@@ -14,7 +14,10 @@
  *    keep running there until upstream rejects, and by then the home is gone)
  *    as well as on a strategy move away from it. The compaction request itself
  *    goes back to the home VM, where the cache is still warm, and only the
- *    short summary moves.
+ *    short summary moves. Claude Code answers that error with a compaction
+ *    that keeps the running turn verbatim, so mid-turn (the request carries
+ *    tool results) the turn is ended instead with a short assistant reply
+ *    asking for /compact; the cc-compact-on-pause mod runs it.
  * 3. rehome_after_compact: after a compaction turn, when the account new seats
  *    prefer (7d reset first, seat-order.mjs) has its budget back, re-pin the
  *    session and its device there. The summary is short, so the move costs
@@ -65,6 +68,8 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
 /** The home VM was not chosen for something other than plain capacity (sticky-spill keeps the pin). */
 const FOLLOW_REASONS = new Set(['balanced', 'fill', 'priority-load', 'device-affinity', 'family-affinity'])
 const COMPACTION_MARKER = 'Your task is to create a detailed summary of the conversation so far'
+/** Opens the pause reply; the cc-compact-on-pause mod compacts when a turn ends with it. */
+export const PAUSE_MARKER = '[vm2api:compact]'
 
 let cached = { file: '', mtimeMs: -1, config: DEFAULT_CUSTOM_CONFIG }
 
@@ -122,6 +127,50 @@ export function isCompactionRequest(body) {
     return textOf(messages[i].content).includes(COMPACTION_MARKER)
   }
   return false
+}
+
+/** The request continues a turn: its last user message carries tool results. */
+function isMidTurn(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const last = messages.at(-1)
+  return (
+    last?.role === 'user' && Array.isArray(last.content) && last.content.some((block) => block?.type === 'tool_result')
+  )
+}
+
+function pauseReply(body, homeVmId) {
+  const text =
+    `${PAUSE_MARKER} 当前账号（${homeVmId}）额度快用完了，这一轮先停在这里，免得带着整段上下文换号重写缓存。` +
+    '请执行 /compact，压缩完再发"继续"。'
+  return {
+    type: 'message',
+    id: `msg_vm2api_pause_${Date.now().toString(36)}`,
+    role: 'assistant',
+    model: body?.model || '',
+    content: [{ type: 'text', text }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  }
+}
+
+/** Sends a pause reply as an Anthropic message, streamed when the client asked for a stream. */
+export function writeAssistantReply(res, message, { stream, writeSSEHeaders, json }) {
+  if (!stream) return json(res, 200, message)
+  if (!res.headersSent) writeSSEHeaders(res)
+  const event = (type, data = {}) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
+  event('message_start', { message: { ...message, content: [], stop_reason: null } })
+  message.content.forEach((block, index) => {
+    event('content_block_start', { index, content_block: { type: 'text', text: '' } })
+    event('content_block_delta', { index, delta: { type: 'text_delta', text: block.text } })
+    event('content_block_stop', { index })
+  })
+  event('message_delta', {
+    delta: { stop_reason: message.stop_reason, stop_sequence: null },
+    usage: { output_tokens: message.usage.output_tokens },
+  })
+  event('message_stop')
+  return res.end()
 }
 
 function promptTooLongError(tokens, maximum, details) {
@@ -227,15 +276,18 @@ export class SessionCachePolicy {
     if (!reason) return null
     this.forcedAt.set(stickyKey, now)
     if (this.forcedAt.size > 4096) this.forcedAt.delete(this.forcedAt.keys().next().value)
+    const midTurn = isMidTurn(body)
     console.log(
-      `[custom] force compaction ${stickyKey} home=${home.vmId} next=${staying ? 'home' : selected.vmId} reason=${reason} est_tokens=${tokens}`,
+      `[custom] force compaction ${stickyKey} home=${home.vmId} next=${staying ? 'home' : selected.vmId} reason=${reason} est_tokens=${tokens}${midTurn ? ' pause=mid_turn' : ''}`,
     )
-    return promptTooLongError(Math.max(tokens, minTokens + 1), minTokens, {
+    const error = promptTooLongError(Math.max(tokens, minTokens + 1), minTokens, {
       reason,
       home_vm: home.vmId,
       next_vm: selected.vmId,
       headroom: candidate?.headroom ?? null,
     })
+    // Other protocols cannot carry the reply and get the error.
+    return midTurn ? { ...error, customReply: pauseReply(body, home.vmId) } : error
   }
 
   /** After a verified hop: re-pin the session (and its device) where it was served. */
