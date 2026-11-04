@@ -180,6 +180,7 @@ import { syncClaudeKernelConfigsFromFile } from '../transport/rust-kernel-superv
 import { ensureWorkerCredential } from '../transport/go-worker-client.mjs'
 import { formatPoolSelectionSummary } from '../pool/pool-scheduler.mjs'
 import { extraHeadersFromLimitError, isAccountQuotaExhausted } from '../pool/quota-window.mjs'
+import { writeAssistantReply } from '../custom/session-cache.mjs'
 import {
   filterThinkingForAccount,
   recordThinkingOwners,
@@ -2101,6 +2102,13 @@ export function createHandleProtocol(deps) {
     }
 
     if (result?.responseSent) return
+    if (result?.customReply && protocol === 'anthropic.messages') {
+      logBag.attempt_count = 0
+      logBag.final_state = 'paused'
+      logBag.stop_reason = 'end_turn'
+      logBag.via = result.via || 'pool-failover'
+      return writeAssistantReply(res, result.customReply, { stream: clientStream, writeSSEHeaders, json })
+    }
 
     result = acceptAssistantHop(result)
     if (result?.finalState === 'verified' && logBag.cache_prefix_key) {
