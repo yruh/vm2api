@@ -93,15 +93,16 @@ test('79% admits a small request and rejects a single large cold with inflight=0
   assert.equal(q.inflight.get('a') || 0, 0)
 })
 
-test('5h and 7d bands are independent', () => {
+test('the 5h band does not apply to 7d, whose line is hard', () => {
   const q = quota()
   setUtil(q, 'five', { u5: 0.79, u7: 0.2 })
   assert.equal(q.canAccept('five', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
   assert.equal(q.canAccept('five', { requestRisk: smallRisk }).ok, true)
 
   setUtil(q, 'seven', { u5: 0.2, u7: 0.78 })
-  assert.equal(q.canAccept('seven', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
-  assert.equal(q.canAccept('seven', { requestRisk: smallRisk }).ok, true)
+  assert.equal(q.canAccept('seven', { requestRisk: largeColdRisk }).ok, true)
+  setUtil(q, 'seven', { u5: 0.2, u7: 0.8 })
+  assert.equal(q.canAccept('seven', { requestRisk: smallRisk }).reason, 'quota_7d_safety')
 
   setUtil(q, 'open', { u5: 0.5, u7: 0.5 })
   assert.equal(q.canAccept('open', { requestRisk: largeColdRisk }).ok, true)
@@ -513,7 +514,7 @@ test('prompt estimate is skipped below the band and walked once for in-band acco
   q.release('band-a')
 })
 
-test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% line)', () => {
+test('admission and the panel agree at the 7d line (vm-10: pro, 95% line)', () => {
   const tier = { limit_5h: 0.95, limit_7d: 0.95, max_concurrency: 2 }
   const q = new AccountQuota({
     dataDir: tmpDir(),
@@ -544,13 +545,15 @@ test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% l
     })
   }
 
-  const near = panel(0.9)
-  assert.equal(near.key, 'drain', 'the console must not paint this as 可用')
-  assert.equal(near.accept, true)
-  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).ok, true)
+  const near = panel(0.94)
+  assert.equal(near.key, 'ok')
   q.inflight.set('vm10', 1)
-  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).reason, 'quota_band_inflight')
+  assert.equal(q.canAccept('vm10', { requestRisk: largeColdRisk }).ok, true)
   q.inflight.set('vm10', 0)
+
+  const line = panel(0.95)
+  assert.equal(line.accept, false)
+  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).reason, 'quota_7d_safety')
 
   const open = panel(0.5)
   assert.equal(open.key, 'ok')
