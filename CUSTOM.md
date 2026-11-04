@@ -18,6 +18,10 @@ server stays on the last good release.
   or less budget left), its next turn, whether it stays on the home or moves off it, gets
   `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The compaction
   request goes back to the warm home VM. Smaller sessions keep using the home's last percent.
+  Claude Code answers that error with a compaction that keeps the running turn verbatim, so
+  mid-turn (the request carries tool results) an Anthropic client gets a 200 assistant reply
+  opening with `[vm2api:compact]` instead: the turn ends, and the `cc-compact-on-pause` mod
+  (or the person) runs `/compact`, which summarizes everything.
 - **rehome_after_compact**: after a compaction turn (auto, forced or manual `/compact`), if an
   account that `weekly_reset_first` prefers (higher priority, or 7d reset more than
   `tie_minutes` earlier) is not draining and has at least `min_headroom` budget left, the
