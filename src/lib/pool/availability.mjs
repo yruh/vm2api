@@ -11,7 +11,7 @@ import {
   WINDOW_5H_MS,
   WINDOW_7D_MS,
 } from './quota-window.mjs'
-import { GATE_DRAINING, GATE_GATED, gateZone, quotaGateOf } from './quota-gate.mjs'
+import { GATE_DRAINING, GATE_GATED, gateZone, quotaGateOf, WEEKLY_GATE } from './quota-gate.mjs'
 import { DEFAULT_TIER_POLICIES } from './quota-tiers.mjs'
 import { resolveSlotState } from './schedule-state.mjs'
 import { isOfficialUsageRateLimited } from '../oauth/crs-usage-probe.mjs'
@@ -396,7 +396,7 @@ export function evaluateAccount({
   }
 
   const z5 = gateZone(u5, pol.limit_5h, pol.gate)
-  const z7 = gateZone(u7, pol.limit_7d, pol.gate)
+  const z7 = gateZone(u7, pol.limit_7d, WEEKLY_GATE)
   if (z5 === GATE_GATED) {
     return finish(base, {
       key: 'quota',
