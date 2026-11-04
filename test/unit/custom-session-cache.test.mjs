@@ -245,6 +245,22 @@ test('mid-turn the forced compaction ends the turn with a pause reply', async ()
   assert.ok(forced.customReply.content[0].text.startsWith(PAUSE_MARKER))
 })
 
+test('a system reminder after the tool results is still mid-turn', async () => {
+  const policy = new SessionCachePolicy()
+  const body = bigBody()
+  body.messages[2] = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'out' }] }
+  body.messages.push({ role: 'system', content: '<total_tokens>1 tokens left</total_tokens>' })
+  const forced = await policy.forceCompaction({
+    scheduler: scheduler(),
+    stickyRouter: { resolve: () => HOME },
+    stickyKey: 'sess:mid-system',
+    selected: { ...HOME, selectionReason: 'sticky' },
+    body,
+    selectArgs: {},
+  })
+  assert.ok(forced.customReply.content[0].text.startsWith(PAUSE_MARKER))
+})
+
 test('the pause reply streams as a complete Anthropic message', () => {
   const message = {
     type: 'message',
