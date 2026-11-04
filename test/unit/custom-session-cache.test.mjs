@@ -9,7 +9,7 @@ process.env.KIN_CUSTOM_FILE = path.join(os.tmpdir(), `kin-custom-missing-${proce
 
 const { FailoverRunner } = await import('../../src/lib/pool/failover-runner.mjs')
 const { StickyRouter } = await import('../../src/lib/pool/sticky-router.mjs')
-const { isCompactionRequest, mergeCustomConfig, SessionCachePolicy } = await import(
+const { isCompactionRequest, mergeCustomConfig, PAUSE_MARKER, SessionCachePolicy, writeAssistantReply } = await import(
   '../../src/lib/custom/session-cache.mjs'
 )
 
@@ -225,6 +225,58 @@ test('a large session staying on its draining home is compacted there, small one
     scheduler: scheduler({ home: { draining: false, headroom: 0.5 } }),
   })
   assert.equal(healthy, null)
+  assert.equal(forced.customReply, undefined)
+})
+
+test('mid-turn the forced compaction ends the turn with a pause reply', async () => {
+  const policy = new SessionCachePolicy()
+  const body = bigBody()
+  body.messages[2] = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'out' }] }
+  const forced = await policy.forceCompaction({
+    scheduler: scheduler(),
+    stickyRouter: { resolve: () => HOME },
+    stickyKey: 'sess:mid',
+    selected: { ...HOME, selectionReason: 'sticky' },
+    body,
+    selectArgs: {},
+  })
+  assert.equal(forced.status, 400)
+  assert.equal(forced.customReply.stop_reason, 'end_turn')
+  assert.ok(forced.customReply.content[0].text.startsWith(PAUSE_MARKER))
+})
+
+test('the pause reply streams as a complete Anthropic message', () => {
+  const message = {
+    type: 'message',
+    id: 'msg_p',
+    role: 'assistant',
+    model: 'm',
+    content: [{ type: 'text', text: 'pause' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  }
+  let out = ''
+  let ended = false
+  const res = { headersSent: false, write: (chunk) => (out += chunk), end: () => (ended = true) }
+  writeAssistantReply(res, message, { stream: true, writeSSEHeaders: (r) => (r.headersSent = true), json: null })
+  const events = out.split('\n\n').filter(Boolean)
+  assert.deepEqual(
+    events.map((e) => e.split('\n')[0]),
+    [
+      'event: message_start',
+      'event: content_block_start',
+      'event: content_block_delta',
+      'event: content_block_stop',
+      'event: message_delta',
+      'event: message_stop',
+    ],
+  )
+  assert.equal(JSON.parse(events[2].split('\ndata: ')[1]).delta.text, 'pause')
+  assert.ok(ended && res.headersSent)
+  let sent = null
+  writeAssistantReply({}, message, { stream: false, json: (_res, status, body) => (sent = { status, body }) })
+  assert.equal(sent.status, 200)
 })
 
 test('disabled config changes nothing', async () => {
