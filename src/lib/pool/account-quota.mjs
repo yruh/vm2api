@@ -52,6 +52,7 @@ import {
   gatePolicyFields,
   gateZone,
   quotaGateOf,
+  WEEKLY_GATE,
   worstGateZone,
 } from './quota-gate.mjs'
 
@@ -631,7 +632,7 @@ export class AccountQuota {
     const u5 = asUtilRatio(w5.utilization)
     const u7 = asUtilRatio(w7.utilization)
     const z5 = quotaConfig.block_on_5h ? gateZone(u5, ratio, gate) : GATE_OPEN
-    const z7 = quotaConfig.block_on_7d ? gateZone(u7, weeklyRatio, gate) : GATE_OPEN
+    const z7 = quotaConfig.block_on_7d ? gateZone(u7, weeklyRatio, WEEKLY_GATE) : GATE_OPEN
 
     if (z5 === GATE_GATED) {
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', utilization: u5, status: w5.status }
@@ -852,7 +853,7 @@ export class AccountQuota {
     const u5 = asUtilRatio(headerWindowOrEmpty(acc.unified, '5h').utilization)
     const u7 = asUtilRatio(headerWindowOrEmpty(acc.unified, '7d').utilization)
     const z5 = quotaConfig.block_on_5h ? gateZone(u5, ratio, gate) : GATE_OPEN
-    const z7 = quotaConfig.block_on_7d ? gateZone(u7, weeklyRatio, gate) : GATE_OPEN
+    const z7 = quotaConfig.block_on_7d ? gateZone(u7, weeklyRatio, WEEKLY_GATE) : GATE_OPEN
     return worstGateZone(z5, z7)
   }
 
