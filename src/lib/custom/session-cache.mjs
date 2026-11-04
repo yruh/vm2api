@@ -132,7 +132,8 @@ export function isCompactionRequest(body) {
 /** The request continues a turn: its last user message carries tool results. */
 function isMidTurn(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
-  const last = messages.at(-1)
+  // Claude Code appends system-role reminders after the tool results.
+  const last = messages.findLast((message) => message?.role !== 'system')
   return (
     last?.role === 'user' && Array.isArray(last.content) && last.content.some((block) => block?.type === 'tool_result')
   )
