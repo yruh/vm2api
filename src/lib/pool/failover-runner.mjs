@@ -1094,7 +1094,8 @@ export class FailoverRunner {
           sessionCachePolicy.follow({
             stickyRouter: this.stickyRouter,
             selected,
-            bindKeys,
+            // A pin another request moved meanwhile is newer than this hop.
+            bindKeys: bindKeys.filter((key) => !pinMoved(key)),
             deviceKey,
             sessionId: outboundSessionAccountId === selected.accountId ? outboundSessionId : '',
           })
