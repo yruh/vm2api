@@ -9,7 +9,7 @@
  * weekly_safety_ratio; both are written back so old readers keep working.
  */
 
-import { GATE_OPEN, gateZone, quotaGateOf } from './quota-gate.mjs'
+import { GATE_OPEN, gateZone, quotaGateOf, WEEKLY_GATE } from './quota-gate.mjs'
 
 export const TIER_KEYS = ['default', 'pro', 'max']
 
@@ -138,6 +138,6 @@ export function isNearLimit(acc, policy) {
   const w7 = u.official?.['7d'] || u['7d'] || {}
   return (
     gateZone(utilRatio(w5.utilization), limit5, gate) !== GATE_OPEN ||
-    gateZone(utilRatio(w7.utilization), limit7, gate) !== GATE_OPEN
+    gateZone(utilRatio(w7.utilization), limit7, WEEKLY_GATE) !== GATE_OPEN
   )
 }
