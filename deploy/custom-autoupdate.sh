@@ -66,7 +66,10 @@ idle_min="$(python3 - "${DIR}/data/kin.db" <<'PY' 2>/dev/null
 import sqlite3, sys
 from datetime import datetime, timezone
 c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-row = c.execute("select max(created_at) from usage_logs").fetchone()
+# The console's own probes (every few minutes) are not traffic.
+row = c.execute(
+    "select max(created_at) from usage_logs where coalesce(user_agent, '') not like 'kin-console-test/%'"
+).fetchone()
 if not row or not row[0]:
     print(10**6)
 else:
