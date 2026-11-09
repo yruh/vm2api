@@ -142,7 +142,7 @@ function isMidTurn(body) {
 function pauseReply(body, homeVmId) {
   const text =
     `${PAUSE_MARKER} 当前账号（${homeVmId}）额度快用完了，这一轮先停在这里，免得带着整段上下文换号重写缓存。` +
-    '请执行 /compact，压缩完再发"继续"。'
+    '装了 cc-compact-on-pause 的几秒内会自动压缩；没看到 "Compacted" 就手动执行 /compact。压缩完再发"继续"。'
   return {
     type: 'message',
     id: `msg_vm2api_pause_${Date.now().toString(36)}`,
@@ -235,6 +235,7 @@ export class SessionCachePolicy {
     const deadline = Math.min(Number(selectArgs.deadline) || Infinity, Date.now() + Number(cfg.home_wait_ms || 0))
     const selected = await scheduler.selectAndReserve({ ...selectArgs, excluded, deadline, allowWait: true })
     if (selected?.ok && selected.vmId === home.vmId) {
+      console.log(`[custom] compaction ${stickyKey} on home=${home.vmId}`)
       return { ...selected, selectionReason: 'compact-home' }
     }
     if (selected?.ok) selected.release?.()
