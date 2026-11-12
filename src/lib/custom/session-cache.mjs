@@ -40,17 +40,18 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     min_prompt_tokens: 100_000,
     // Home counts as running out when the scheduler marks it draining, or when
     // its remaining budget (configured limit minus usage) is at most this.
-    trigger_headroom: 0.03,
+    trigger_headroom: 0.02,
     // Also force when the home VM has already left the pool. The compaction
     // then runs cold on another VM, so it saves nothing up front.
     when_home_unavailable: false,
     // One forced compaction per session within this window, so a client that
     // does not compact is never locked out.
     cooldown_ms: 15 * 60 * 1000,
-    // Once compacted on a home, a session is not forced again on that same
-    // home within this window: it keeps running there until the account is
-    // really used up (a 100% limit can be spent to the end). Compacting again
-    // on the same account saves nothing.
+    // Once a session has compacted on a home (forced, manual /compact or the
+    // client's own auto-compact), it is not forced again on that same home
+    // within this window: it keeps running there until the account is really
+    // used up (a 100% limit can be spent to the end). Compacting again on the
+    // same account saves nothing.
     once_per_home_ms: 7 * 24 * 60 * 60 * 1000,
     // How long the compaction request may wait for its home VM before it
     // goes through normal selection.
@@ -202,6 +203,14 @@ export class SessionCachePolicy {
     this.config = config
     /** stickyKey → last forced compaction { at (ms), vmId }. */
     this.forcedAt = new Map()
+    /** stickyKey → last compaction turn seen { at (ms), vmId of the home }. */
+    this.compactedAt = new Map()
+  }
+
+  noteCompaction(stickyKey, vmId) {
+    this.compactedAt.delete(stickyKey)
+    this.compactedAt.set(stickyKey, { at: Date.now(), vmId })
+    if (this.compactedAt.size > 4096) this.compactedAt.delete(this.compactedAt.keys().next().value)
   }
 
   /**
@@ -221,9 +230,10 @@ export class SessionCachePolicy {
   async compactionHome({ scheduler, stickyRouter, stickyKey, body, selectArgs }) {
     const cfg = this.config().force_compact
     if (!cfg.enabled || !stickyKey || selectArgs?.pinVmId || !isCompactionRequest(body)) return null
-    if (typeof scheduler?.eligibleCandidates !== 'function') return null
     const home = stickyRouter?.resolve?.(stickyKey)
     if (!home?.vmId) return null
+    this.noteCompaction(stickyKey, home.vmId)
+    if (typeof scheduler?.eligibleCandidates !== 'function') return null
     const all = await scheduler.eligibleCandidates({
       model: selectArgs.model,
       excluded: selectArgs.excluded,
@@ -263,7 +273,10 @@ export class SessionCachePolicy {
     const now = Date.now()
     const last = this.forcedAt.get(stickyKey)
     if (last && now - last.at < Number(cfg.cooldown_ms || 0)) return null
-    if (last && last.vmId === home.vmId && now - last.at < Number(cfg.once_per_home_ms || 0)) return null
+    const perHome = Number(cfg.once_per_home_ms || 0)
+    if (last && last.vmId === home.vmId && now - last.at < perHome) return null
+    const compacted = this.compactedAt.get(stickyKey)
+    if (compacted && compacted.vmId === home.vmId && now - compacted.at < perHome) return null
     const tokens = estimatePromptTokens(body)
     const minTokens = Math.max(1, Math.floor(Number(cfg.min_prompt_tokens) || 0))
     if (tokens < minTokens || typeof scheduler?.eligibleCandidates !== 'function') return null
