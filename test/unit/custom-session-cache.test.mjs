@@ -260,6 +260,29 @@ test('a session compacted on its home is not forced again there, only after it m
   }
 })
 
+test('after a manual compaction on its home a session is not forced there', async (t) => {
+  const { sticky, stickyKey } = setup(t, 'manual')
+  const policy = new SessionCachePolicy()
+  const sched = scheduler({ home: { draining: false, headroom: 0.01 } })
+  const home = await policy.selectCompactionHome({
+    scheduler: sched,
+    stickyRouter: sticky,
+    stickyKey,
+    body: bigBody(COMPACT_TEXT),
+    selectArgs: { model: 'claude-opus-test' },
+  })
+  assert.equal(home.vmId, 'vm-04')
+  const forced = await policy.forceCompaction({
+    scheduler: sched,
+    stickyRouter: sticky,
+    stickyKey,
+    selected: { ...HOME, selectionReason: 'sticky' },
+    body: bigBody(),
+    selectArgs: {},
+  })
+  assert.equal(forced, null)
+})
+
 test('mid-turn the forced compaction ends the turn with a pause reply', async () => {
   const policy = new SessionCachePolicy()
   const body = bigBody()
