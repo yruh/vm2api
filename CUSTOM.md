@@ -45,7 +45,7 @@ Config: `src/config/custom.json` (host-mounted, the panel never writes it), all 
   "force_compact": {
     "enabled": true,
     "min_prompt_tokens": 100000,
-    "trigger_headroom": 0.02,
+    "trigger_headroom": 0.01,
     "when_home_unavailable": false,
     "cooldown_ms": 900000,
     "once_per_home_ms": 604800000,
