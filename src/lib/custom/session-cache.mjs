@@ -40,7 +40,9 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     min_prompt_tokens: 100_000,
     // Home counts as running out when the scheduler marks it draining, or when
     // its remaining budget (configured limit minus usage) is at most this.
-    trigger_headroom: 0.02,
+    // Anthropic reports usage in whole percents, so 0.01 is the last reading
+    // before the limit: compaction waits for the account's final percent.
+    trigger_headroom: 0.01,
     // Also force when the home VM has already left the pool. The compaction
     // then runs cold on another VM, so it saves nothing up front.
     when_home_unavailable: false,
@@ -291,7 +293,7 @@ export class SessionCachePolicy {
       if (cfg.when_home_unavailable && !staying) reason = 'home_unavailable'
     } else if (candidate.draining) {
       reason = 'home_draining'
-    } else if (candidate.headroom != null && Number(candidate.headroom) <= Number(cfg.trigger_headroom)) {
+    } else if (candidate.headroom != null && Number(candidate.headroom) <= Number(cfg.trigger_headroom) + 1e-9) {
       reason = 'home_low_headroom'
     }
     if (!reason) return null
