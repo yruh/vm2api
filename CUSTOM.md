@@ -46,6 +46,7 @@ Config: `src/config/custom.json` (host-mounted, the panel never writes it), all 
     "trigger_headroom": 0.03,
     "when_home_unavailable": false,
     "cooldown_ms": 900000,
+    "once_per_home_ms": 604800000,
     "home_wait_ms": 20000
   },
   "weekly_reset_first": { "enabled": true, "tie_minutes": 60 },
