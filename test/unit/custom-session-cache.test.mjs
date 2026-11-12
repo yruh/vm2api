@@ -228,6 +228,38 @@ test('a large session staying on its draining home is compacted there, small one
   assert.equal(forced.customReply, undefined)
 })
 
+test('a session compacted on its home is not forced again there, only after it moves', async () => {
+  const policy = new SessionCachePolicy()
+  let home = HOME
+  const args = () => ({
+    scheduler: scheduler({ home: { draining: false, headroom: 0.01 } }),
+    stickyRouter: { resolve: () => home },
+    stickyKey: 'sess:burn',
+    selected: { ...home, selectionReason: 'sticky' },
+    body: bigBody(),
+    selectArgs: {},
+  })
+  const realNow = Date.now
+  let now = realNow()
+  Date.now = () => now
+  try {
+    assert.equal((await policy.forceCompaction(args())).status, 400)
+    now += 60 * 60 * 1000
+    assert.equal(await policy.forceCompaction(args()), null)
+    now += 24 * 60 * 60 * 1000
+    assert.equal(await policy.forceCompaction(args()), null)
+    // The session has moved to another account that is running out too.
+    home = OTHER
+    const moved = await policy.forceCompaction({
+      ...args(),
+      scheduler: { async eligibleCandidates() { return [{ ...OTHER, draining: true, headroom: 0 }] } },
+    })
+    assert.equal(moved.status, 400)
+  } finally {
+    Date.now = realNow
+  }
+})
+
 test('mid-turn the forced compaction ends the turn with a pause reply', async () => {
   const policy = new SessionCachePolicy()
   const body = bigBody()
