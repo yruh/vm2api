@@ -47,6 +47,11 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     // One forced compaction per session within this window, so a client that
     // does not compact is never locked out.
     cooldown_ms: 15 * 60 * 1000,
+    // Once compacted on a home, a session is not forced again on that same
+    // home within this window: it keeps running there until the account is
+    // really used up (a 100% limit can be spent to the end). Compacting again
+    // on the same account saves nothing.
+    once_per_home_ms: 7 * 24 * 60 * 60 * 1000,
     // How long the compaction request may wait for its home VM before it
     // goes through normal selection.
     home_wait_ms: 20_000,
@@ -195,7 +200,7 @@ function promptTooLongError(tokens, maximum, details) {
 export class SessionCachePolicy {
   constructor({ config = customConfig } = {}) {
     this.config = config
-    /** stickyKey → last forced compaction (ms). */
+    /** stickyKey → last forced compaction { at (ms), vmId }. */
     this.forcedAt = new Map()
   }
 
@@ -256,8 +261,9 @@ export class SessionCachePolicy {
     if (!staying && !FOLLOW_REASONS.has(selected.selectionReason)) return null
     if (isCompactionRequest(body)) return null
     const now = Date.now()
-    const last = this.forcedAt.get(stickyKey) || 0
-    if (now - last < Number(cfg.cooldown_ms || 0)) return null
+    const last = this.forcedAt.get(stickyKey)
+    if (last && now - last.at < Number(cfg.cooldown_ms || 0)) return null
+    if (last && last.vmId === home.vmId && now - last.at < Number(cfg.once_per_home_ms || 0)) return null
     const tokens = estimatePromptTokens(body)
     const minTokens = Math.max(1, Math.floor(Number(cfg.min_prompt_tokens) || 0))
     if (tokens < minTokens || typeof scheduler?.eligibleCandidates !== 'function') return null
@@ -276,7 +282,8 @@ export class SessionCachePolicy {
       reason = 'home_low_headroom'
     }
     if (!reason) return null
-    this.forcedAt.set(stickyKey, now)
+    this.forcedAt.delete(stickyKey)
+    this.forcedAt.set(stickyKey, { at: now, vmId: home.vmId })
     if (this.forcedAt.size > 4096) this.forcedAt.delete(this.forcedAt.keys().next().value)
     const midTurn = isMidTurn(body)
     console.log(
