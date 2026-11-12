@@ -228,6 +228,20 @@ test('a large session staying on its draining home is compacted there, small one
   assert.equal(forced.customReply, undefined)
 })
 
+test('compaction waits for the last percent: 98% runs on, 99% (1 - 0.99 in floats) forces', async () => {
+  const policy = new SessionCachePolicy()
+  const args = (stickyKey, headroom) => ({
+    scheduler: scheduler({ home: { draining: false, headroom } }),
+    stickyRouter: { resolve: () => HOME },
+    stickyKey,
+    selected: { ...HOME, selectionReason: 'sticky' },
+    body: bigBody(),
+    selectArgs: {},
+  })
+  assert.equal(await policy.forceCompaction(args('sess:98', 1 - 0.98)), null)
+  assert.equal((await policy.forceCompaction(args('sess:99', 1 - 0.99))).status, 400)
+})
+
 test('a session compacted on its home is not forced again there, only after it moves', async () => {
   const policy = new SessionCachePolicy()
   let home = HOME
