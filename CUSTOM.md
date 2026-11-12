@@ -21,7 +21,9 @@ server stays on the last good release.
   Claude Code answers that error with a compaction that keeps the running turn verbatim, so
   mid-turn (the request carries tool results) an Anthropic client gets a 200 assistant reply
   opening with `[vm2api:compact]` instead: the turn ends, and the `cc-compact-on-pause` mod
-  (or the person) runs `/compact`, which summarizes everything.
+  (or the person) runs `/compact`, which summarizes everything. Once a session has compacted
+  on a home (forced, manual or the client's own), it is not forced again on that home
+  (`once_per_home_ms`): it spends the account to its limit and moves only when it is used up.
 - **rehome_after_compact**: after a compaction turn (auto, forced or manual `/compact`), if an
   account that `weekly_reset_first` prefers (higher priority, or 7d reset more than
   `tie_minutes` earlier) is not draining and has at least `min_headroom` budget left, the
@@ -43,7 +45,7 @@ Config: `src/config/custom.json` (host-mounted, the panel never writes it), all 
   "force_compact": {
     "enabled": true,
     "min_prompt_tokens": 100000,
-    "trigger_headroom": 0.03,
+    "trigger_headroom": 0.02,
     "when_home_unavailable": false,
     "cooldown_ms": 900000,
     "once_per_home_ms": 604800000,
