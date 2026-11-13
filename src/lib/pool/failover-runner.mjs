@@ -856,6 +856,18 @@ export class FailoverRunner {
             preserveMessageCache: quotaRequest?.preserveMessageCache,
           },
         }
+        if (attemptNo === 1) {
+          // Accounts down to the compaction reserve leave `excluded`; a large
+          // session pinned to one is told to compact there instead.
+          const forced = await sessionCachePolicy.compactionReserve({
+            scheduler: this.scheduler,
+            stickyRouter: this.stickyRouter,
+            stickyKey,
+            body: requestBody,
+            selectArgs,
+          })
+          if (forced) return { ...forced, attemptCount: 0, finalState: 'rejected' }
+        }
         if (avoid) {
           const elsewhere = await this.scheduler.selectAndReserve({ ...selectArgs, avoid, allowWait: false })
           avoid = null
@@ -938,20 +950,6 @@ export class FailoverRunner {
         if (!selected?.ok) {
           const exhausted = selectionFailure(selected, { excluded, lastPolicy, lastResult, hops: budget.hops })
           return preferLastResult(lastResult, lastPolicy, exhausted, attribution())
-        }
-        if (attemptNo === 1) {
-          const forced = await sessionCachePolicy
-            .forceCompaction({
-              scheduler: this.scheduler,
-              stickyRouter: this.stickyRouter,
-              stickyKey,
-              selected,
-              body: requestBody,
-              selectArgs: { model, pinVmId, ownerScope, keyScope },
-            })
-            .catch(() => null)
-          // The finally below releases the seat.
-          if (forced) return { ...forced, attemptCount: 0, finalState: 'rejected' }
         }
         repairPending = false
         snapshotPins()
