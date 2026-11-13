@@ -8,13 +8,13 @@
  *    without this the next free turn on the old home (or the compaction turn,
  *    which goes to the pin) lands on a cache that has expired by then, and
  *    every turn elsewhere gets a fresh outbound session.
- * 2. force_compact: once a large session's home VM is about to run out of
- *    5h/7d budget, answer "prompt is too long" so Claude Code compacts first.
- *    This fires on the turn that stays on the draining home (seated sessions
- *    keep running there until upstream rejects, and by then the home is gone)
- *    as well as on a strategy move away from it. The compaction request itself
- *    goes back to the home VM, where the cache is still warm, and only the
- *    short summary moves. Claude Code answers that error with a compaction
+ * 2. force_compact: the last few percent of every account's 5h/7d budget
+ *    (reserve_headroom) are kept for compaction turns. Once an account is down
+ *    to that reserve, other requests no longer go to it, and a large session
+ *    pinned there is answered "prompt is too long" once so Claude Code
+ *    compacts first. The compaction request itself goes back to the home VM,
+ *    where the cache is still warm, and is paid from the reserve; only the
+ *    short summary moves on. Claude Code answers that error with a compaction
  *    that keeps the running turn verbatim, so mid-turn (the request carries
  *    tool results) the turn is ended instead with a short assistant reply
  *    asking for /compact; the cc-compact-on-pause mod runs it.
@@ -38,23 +38,15 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     enabled: true,
     // Estimated prompt tokens (leans high) a session needs before it is worth compacting.
     min_prompt_tokens: 100_000,
-    // Home counts as running out when the scheduler marks it draining, or when
-    // its remaining budget (configured limit minus usage) is at most this.
-    // Anthropic reports usage in whole percents, so 0.01 is the last reading
-    // before the limit: compaction waits for the account's final percent.
-    trigger_headroom: 0.01,
-    // Also force when the home VM has already left the pool. The compaction
-    // then runs cold on another VM, so it saves nothing up front.
-    when_home_unavailable: false,
-    // One forced compaction per session within this window, so a client that
-    // does not compact is never locked out.
-    cooldown_ms: 15 * 60 * 1000,
-    // Once a session has compacted on a home (forced, manual /compact or the
-    // client's own auto-compact), it is not forced again on that same home
-    // within this window: it keeps running there until the account is really
-    // used up (a 100% limit can be spent to the end). Compacting again on the
-    // same account saves nothing.
-    once_per_home_ms: 7 * 24 * 60 * 60 * 1000,
+    // Remaining budget (configured limit minus usage, the smaller of 5h and
+    // 7d) kept for compaction turns. An account down to this takes only
+    // compaction requests; a single turn can spend more than one percent, so
+    // waiting for 99% leaves nothing to compact with.
+    reserve_headroom: 0.03,
+    // A session is forced at most once per home within this window, and not
+    // at all on a home it already compacted on inside the reserve (forced,
+    // manual /compact or the client's own auto-compact).
+    once_per_home_ms: 5 * 60 * 60 * 1000,
     // How long the compaction request may wait for its home VM before it
     // goes through normal selection.
     home_wait_ms: 20_000,
@@ -205,14 +197,21 @@ export class SessionCachePolicy {
     this.config = config
     /** stickyKey → last forced compaction { at (ms), vmId }. */
     this.forcedAt = new Map()
-    /** stickyKey → last compaction turn seen { at (ms), vmId of the home }. */
+    /** stickyKey → last compaction turn seen { at (ms), vmId of the home, reserved: home was in the reserve }. */
     this.compactedAt = new Map()
+    /** vmId → last time the reserve log line was written. */
+    this.reserveLoggedAt = new Map()
   }
 
-  noteCompaction(stickyKey, vmId) {
+  noteCompaction(stickyKey, vmId, reserved) {
     this.compactedAt.delete(stickyKey)
-    this.compactedAt.set(stickyKey, { at: Date.now(), vmId })
+    this.compactedAt.set(stickyKey, { at: Date.now(), vmId, reserved: !!reserved })
     if (this.compactedAt.size > 4096) this.compactedAt.delete(this.compactedAt.keys().next().value)
+  }
+
+  inReserve(candidate) {
+    const reserve = Number(this.config().force_compact.reserve_headroom) || 0
+    return reserve > 0 && candidate?.headroom != null && Number(candidate.headroom) <= reserve + 1e-9
   }
 
   /**
@@ -234,15 +233,19 @@ export class SessionCachePolicy {
     if (!cfg.enabled || !stickyKey || selectArgs?.pinVmId || !isCompactionRequest(body)) return null
     const home = stickyRouter?.resolve?.(stickyKey)
     if (!home?.vmId) return null
-    this.noteCompaction(stickyKey, home.vmId)
-    if (typeof scheduler?.eligibleCandidates !== 'function') return null
+    if (typeof scheduler?.eligibleCandidates !== 'function') {
+      this.noteCompaction(stickyKey, home.vmId, false)
+      return null
+    }
     const all = await scheduler.eligibleCandidates({
       model: selectArgs.model,
       excluded: selectArgs.excluded,
       ownerScope: selectArgs.ownerScope,
       keyScope: selectArgs.keyScope,
     })
-    if (!all.some((candidate) => candidate.vmId === home.vmId)) return null
+    const homeCandidate = all.find((candidate) => candidate.vmId === home.vmId)
+    this.noteCompaction(stickyKey, home.vmId, !homeCandidate || this.inReserve(homeCandidate))
+    if (!homeCandidate) return null
     const excluded = new Set(selectArgs.excluded || [])
     for (const candidate of all) {
       if (candidate.vmId === home.vmId) continue
@@ -260,55 +263,75 @@ export class SessionCachePolicy {
   }
 
   /**
-   * First hop of a large session whose home is running out, either staying
-   * on it or moved off it by a strategy pick: the "prompt is too long" result
-   * to return instead, or null to proceed.
+   * Before the first selection of a turn. Accounts down to the compaction
+   * reserve take only compaction turns: they are added to selectArgs.excluded
+   * (a Set, kept across hops). A large session pinned to such an account gets
+   * the "prompt is too long" result (or the mid-turn pause reply) once
+   * instead, so its compaction runs there from the reserve. Returns that
+   * result, or null to proceed.
    */
-  async forceCompaction({ scheduler, stickyRouter, stickyKey, selected, body, selectArgs }) {
+  async compactionReserve(args = {}) {
+    try {
+      return await this.applyReserve(args)
+    } catch (error) {
+      if (error?.name === 'AbortError' || error?.code === 'selection_cancelled') throw error
+      console.warn(`[custom] compaction reserve check failed: ${error?.message || error}`)
+      return null
+    }
+  }
+
+  async applyReserve({ scheduler, stickyRouter, stickyKey, body, selectArgs = {} }) {
     const cfg = this.config().force_compact
-    if (!cfg.enabled || !stickyKey || selectArgs?.pinVmId || !selected?.vmId) return null
-    const home = stickyRouter?.resolve?.(stickyKey)
-    if (!home?.vmId) return null
-    const staying = home.vmId === selected.vmId
-    if (!staying && !FOLLOW_REASONS.has(selected.selectionReason)) return null
-    if (isCompactionRequest(body)) return null
-    const now = Date.now()
-    const last = this.forcedAt.get(stickyKey)
-    if (last && now - last.at < Number(cfg.cooldown_ms || 0)) return null
-    const perHome = Number(cfg.once_per_home_ms || 0)
-    if (last && last.vmId === home.vmId && now - last.at < perHome) return null
-    const compacted = this.compactedAt.get(stickyKey)
-    if (compacted && compacted.vmId === home.vmId && now - compacted.at < perHome) return null
-    const tokens = estimatePromptTokens(body)
-    const minTokens = Math.max(1, Math.floor(Number(cfg.min_prompt_tokens) || 0))
-    if (tokens < minTokens || typeof scheduler?.eligibleCandidates !== 'function') return null
-    const [candidate] = await scheduler.eligibleCandidates({
+    if (!cfg.enabled || selectArgs.pinVmId || isCompactionRequest(body)) return null
+    if (!(selectArgs.excluded instanceof Set) || typeof scheduler?.eligibleCandidates !== 'function') return null
+    if (!((Number(cfg.reserve_headroom) || 0) > 0)) return null
+    const all = await scheduler.eligibleCandidates({
       model: selectArgs.model,
       ownerScope: selectArgs.ownerScope,
       keyScope: selectArgs.keyScope,
-      onlyVmIds: new Set([home.vmId]),
     })
-    let reason = ''
-    if (!candidate) {
-      if (cfg.when_home_unavailable && !staying) reason = 'home_unavailable'
-    } else if (candidate.draining) {
-      reason = 'home_draining'
-    } else if (candidate.headroom != null && Number(candidate.headroom) <= Number(cfg.trigger_headroom) + 1e-9) {
-      reason = 'home_low_headroom'
+    const reserved = all.filter((candidate) => this.inReserve(candidate))
+    if (!reserved.length) return null
+    const home = stickyKey ? stickyRouter?.resolve?.(stickyKey) : null
+    const homeCandidate = home?.vmId ? reserved.find((candidate) => candidate.vmId === home.vmId) : null
+    if (homeCandidate) {
+      const forced = this.forceOnHome(cfg, stickyKey, homeCandidate, body)
+      if (forced) return forced
     }
-    if (!reason) return null
+    const now = Date.now()
+    for (const candidate of reserved) {
+      selectArgs.excluded.add(candidate.vmId)
+      selectArgs.excluded.add(candidate.accountId)
+      const logged = this.reserveLoggedAt.get(candidate.vmId) || 0
+      if (now - logged >= 10 * 60 * 1000) {
+        this.reserveLoggedAt.set(candidate.vmId, now)
+        console.log(`[custom] ${candidate.vmId} headroom=${candidate.headroom} kept for compaction turns only`)
+      }
+    }
+    return null
+  }
+
+  forceOnHome(cfg, stickyKey, home, body) {
+    const now = Date.now()
+    const window = Number(cfg.once_per_home_ms || 0)
+    const last = this.forcedAt.get(stickyKey)
+    if (last && last.vmId === home.vmId && now - last.at < window) return null
+    const compacted = this.compactedAt.get(stickyKey)
+    if (compacted && compacted.reserved && compacted.vmId === home.vmId && now - compacted.at < window) return null
+    const tokens = estimatePromptTokens(body)
+    const minTokens = Math.max(1, Math.floor(Number(cfg.min_prompt_tokens) || 0))
+    if (tokens < minTokens) return null
     this.forcedAt.delete(stickyKey)
     this.forcedAt.set(stickyKey, { at: now, vmId: home.vmId })
     if (this.forcedAt.size > 4096) this.forcedAt.delete(this.forcedAt.keys().next().value)
     const midTurn = isMidTurn(body)
     console.log(
-      `[custom] force compaction ${stickyKey} home=${home.vmId} next=${staying ? 'home' : selected.vmId} reason=${reason} est_tokens=${tokens}${midTurn ? ' pause=mid_turn' : ''}`,
+      `[custom] force compaction ${stickyKey} home=${home.vmId} headroom=${home.headroom} est_tokens=${tokens}${midTurn ? ' pause=mid_turn' : ''}`,
     )
     const error = promptTooLongError(Math.max(tokens, minTokens + 1), minTokens, {
-      reason,
+      reason: 'home_in_compaction_reserve',
       home_vm: home.vmId,
-      next_vm: selected.vmId,
-      headroom: candidate?.headroom ?? null,
+      headroom: home.headroom ?? null,
     })
     // Other protocols cannot carry the reply and get the error.
     return midTurn ? { ...error, customReply: pauseReply(body, home.vmId) } : error
