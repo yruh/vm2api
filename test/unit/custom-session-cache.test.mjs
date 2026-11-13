@@ -137,11 +137,12 @@ test('a capacity spill keeps the session pinned at home', async (t) => {
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
 })
 
-test('a large session leaving a draining home gets prompt-too-long once, then proceeds', async (t) => {
+test('a large session whose home is down to the reserve is told to compact once, then leaves it', async (t) => {
   const { sticky, stickyKey } = setup(t, 'force')
   const sched = scheduler()
   const runner = new FailoverRunner({ scheduler: sched, stickyRouter: sticky })
   let calls = 0
+  let servedOn = null
   const run = () =>
     runner.run({
       requestId: `force-${calls}`,
@@ -149,20 +150,23 @@ test('a large session leaving a draining home gets prompt-too-long once, then pr
       model: 'claude-opus-test',
       stickyKey,
       applyAttempt: attemptMeta,
-      callAttempt: () => {
+      callAttempt: ({ candidate }) => {
         calls++
+        servedOn = candidate.vmId
         return success()
       },
     })
   const first = await run()
   assert.equal(first.status, 400)
   assert.match(first.body.error.message, /^prompt is too long: \d+ tokens > \d+ maximum$/)
+  assert.equal(first.body.error.details.reason, 'home_in_compaction_reserve')
   assert.equal(calls, 0)
-  assert.equal(sched.calls.released, 1)
+  assert.equal(sched.calls.select.length, 0)
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
   const second = await run()
   assert.equal(second.ok, true)
-  assert.equal(calls, 1)
+  assert.equal(servedOn, 'vm-01')
+  assert.ok(sched.calls.select[0].has('vm-04'))
 })
 
 test('a healthy home is left without forcing compaction', async (t) => {
@@ -182,7 +186,7 @@ test('a healthy home is left without forcing compaction', async (t) => {
   assert.equal(result.ok, true)
 })
 
-test('the compaction turn goes back to the warm home VM', async (t) => {
+test('the compaction turn goes back to the warm home VM and may spend its reserve', async (t) => {
   const { sticky, stickyKey } = setup(t, 'compact')
   const sched = scheduler()
   const runner = new FailoverRunner({ scheduler: sched, stickyRouter: sticky })
@@ -204,69 +208,53 @@ test('the compaction turn goes back to the warm home VM', async (t) => {
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
 })
 
-test('a large session staying on its draining home is compacted there, small ones are not', async () => {
-  const policy = new SessionCachePolicy()
-  const args = (stickyKey, body) => ({
-    scheduler: scheduler(),
-    stickyRouter: { resolve: () => HOME },
+function reserveArgs(stickyKey, body, { headroom = 0.02, home = HOME } = {}) {
+  return {
+    scheduler: scheduler({ home: { draining: false, headroom } }),
+    stickyRouter: { resolve: () => home },
     stickyKey,
-    selected: { ...HOME, selectionReason: 'sticky' },
     body,
-    selectArgs: {},
-  })
-  const forced = await policy.forceCompaction(args('sess:stay', bigBody()))
+    selectArgs: { excluded: new Set() },
+  }
+}
+
+test('the reserve starts at 3% left: 96% runs on, 97% forces a large session', async () => {
+  const policy = new SessionCachePolicy()
+  const open = reserveArgs('sess:96', bigBody(), { headroom: 1 - 0.96 })
+  assert.equal(await policy.compactionReserve(open), null)
+  assert.equal(open.selectArgs.excluded.size, 0)
+  const forced = await policy.compactionReserve(reserveArgs('sess:97', bigBody(), { headroom: 1 - 0.97 }))
   assert.equal(forced.status, 400)
-  assert.equal(forced.body.error.details.reason, 'home_draining')
-  assert.equal(await policy.forceCompaction(args('sess:stay', bigBody())), null)
-  assert.equal(await policy.forceCompaction(args('sess:small', { messages: [{ role: 'user', content: 'hi' }] })), null)
-  assert.equal(await policy.forceCompaction(args('sess:compact', bigBody(COMPACT_TEXT))), null)
-  const healthy = await policy.forceCompaction({
-    ...args('sess:healthy', bigBody()),
-    scheduler: scheduler({ home: { draining: false, headroom: 0.5 } }),
-  })
-  assert.equal(healthy, null)
+  assert.equal(forced.body.error.details.reason, 'home_in_compaction_reserve')
   assert.equal(forced.customReply, undefined)
 })
 
-test('compaction waits for the last percent: 98% runs on, 99% (1 - 0.99 in floats) forces', async () => {
+test('inside the reserve small sessions are kept off the account, compaction turns are not', async () => {
   const policy = new SessionCachePolicy()
-  const args = (stickyKey, headroom) => ({
-    scheduler: scheduler({ home: { draining: false, headroom } }),
-    stickyRouter: { resolve: () => HOME },
-    stickyKey,
-    selected: { ...HOME, selectionReason: 'sticky' },
-    body: bigBody(),
-    selectArgs: {},
-  })
-  assert.equal(await policy.forceCompaction(args('sess:98', 1 - 0.98)), null)
-  assert.equal((await policy.forceCompaction(args('sess:99', 1 - 0.99))).status, 400)
+  const small = reserveArgs('sess:small', { messages: [{ role: 'user', content: 'hi' }] })
+  assert.equal(await policy.compactionReserve(small), null)
+  assert.ok(small.selectArgs.excluded.has('vm-04') && small.selectArgs.excluded.has('account-4'))
+  assert.ok(!small.selectArgs.excluded.has('vm-01'))
+  const compact = reserveArgs('sess:compact', bigBody(COMPACT_TEXT))
+  assert.equal(await policy.compactionReserve(compact), null)
+  assert.equal(compact.selectArgs.excluded.size, 0)
 })
 
-test('a session compacted on its home is not forced again there, only after it moves', async () => {
+test('a session is forced once per home, then only kept off it; on its next home it is forced again', async () => {
   const policy = new SessionCachePolicy()
-  let home = HOME
-  const args = () => ({
-    scheduler: scheduler({ home: { draining: false, headroom: 0.01 } }),
-    stickyRouter: { resolve: () => home },
-    stickyKey: 'sess:burn',
-    selected: { ...home, selectionReason: 'sticky' },
-    body: bigBody(),
-    selectArgs: {},
-  })
   const realNow = Date.now
   let now = realNow()
   Date.now = () => now
   try {
-    assert.equal((await policy.forceCompaction(args())).status, 400)
+    assert.equal((await policy.compactionReserve(reserveArgs('sess:burn', bigBody()))).status, 400)
     now += 60 * 60 * 1000
-    assert.equal(await policy.forceCompaction(args()), null)
-    now += 24 * 60 * 60 * 1000
-    assert.equal(await policy.forceCompaction(args()), null)
-    // The session has moved to another account that is running out too.
-    home = OTHER
-    const moved = await policy.forceCompaction({
-      ...args(),
-      scheduler: { async eligibleCandidates() { return [{ ...OTHER, draining: true, headroom: 0 }] } },
+    const again = reserveArgs('sess:burn', bigBody())
+    assert.equal(await policy.compactionReserve(again), null)
+    assert.ok(again.selectArgs.excluded.has('vm-04'))
+    // The session moved to another account that is down to its reserve too.
+    const moved = await policy.compactionReserve({
+      ...reserveArgs('sess:burn', bigBody(), { home: OTHER }),
+      scheduler: { async eligibleCandidates() { return [{ ...OTHER, draining: false, headroom: 0.01 }] } },
     })
     assert.equal(moved.status, 400)
   } finally {
@@ -274,41 +262,30 @@ test('a session compacted on its home is not forced again there, only after it m
   }
 })
 
-test('after a manual compaction on its home a session is not forced there', async (t) => {
+test('a session that compacted inside the reserve is not forced there; one that compacted earlier is', async (t) => {
   const { sticky, stickyKey } = setup(t, 'manual')
   const policy = new SessionCachePolicy()
-  const sched = scheduler({ home: { draining: false, headroom: 0.01 } })
-  const home = await policy.selectCompactionHome({
-    scheduler: sched,
-    stickyRouter: sticky,
-    stickyKey,
-    body: bigBody(COMPACT_TEXT),
-    selectArgs: { model: 'claude-opus-test' },
-  })
-  assert.equal(home.vmId, 'vm-04')
-  const forced = await policy.forceCompaction({
-    scheduler: sched,
-    stickyRouter: sticky,
-    stickyKey,
-    selected: { ...HOME, selectionReason: 'sticky' },
-    body: bigBody(),
-    selectArgs: {},
-  })
-  assert.equal(forced, null)
+  const compactOn = (headroom) =>
+    policy.selectCompactionHome({
+      scheduler: scheduler({ home: { draining: false, headroom } }),
+      stickyRouter: sticky,
+      stickyKey,
+      body: bigBody(COMPACT_TEXT),
+      selectArgs: { model: 'claude-opus-test' },
+    })
+  const reserve = () => policy.compactionReserve({ ...reserveArgs(stickyKey, bigBody()), stickyRouter: sticky })
+  assert.equal((await compactOn(0.5)).vmId, 'vm-04')
+  assert.equal((await reserve()).status, 400)
+  policy.forcedAt.clear()
+  assert.equal((await compactOn(0.02)).vmId, 'vm-04')
+  assert.equal(await reserve(), null)
 })
 
 test('mid-turn the forced compaction ends the turn with a pause reply', async () => {
   const policy = new SessionCachePolicy()
   const body = bigBody()
   body.messages[2] = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'out' }] }
-  const forced = await policy.forceCompaction({
-    scheduler: scheduler(),
-    stickyRouter: { resolve: () => HOME },
-    stickyKey: 'sess:mid',
-    selected: { ...HOME, selectionReason: 'sticky' },
-    body,
-    selectArgs: {},
-  })
+  const forced = await policy.compactionReserve(reserveArgs('sess:mid', body))
   assert.equal(forced.status, 400)
   assert.equal(forced.customReply.stop_reason, 'end_turn')
   assert.ok(forced.customReply.content[0].text.startsWith(PAUSE_MARKER))
@@ -319,14 +296,7 @@ test('a system reminder after the tool results is still mid-turn', async () => {
   const body = bigBody()
   body.messages[2] = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'out' }] }
   body.messages.push({ role: 'system', content: '<total_tokens>1 tokens left</total_tokens>' })
-  const forced = await policy.forceCompaction({
-    scheduler: scheduler(),
-    stickyRouter: { resolve: () => HOME },
-    stickyKey: 'sess:mid-system',
-    selected: { ...HOME, selectionReason: 'sticky' },
-    body,
-    selectArgs: {},
-  })
+  const forced = await policy.compactionReserve(reserveArgs('sess:mid-system', body))
   assert.ok(forced.customReply.content[0].text.startsWith(PAUSE_MARKER))
 })
 
@@ -368,15 +338,9 @@ test('disabled config changes nothing', async () => {
   const policy = new SessionCachePolicy({
     config: () => mergeCustomConfig({ follow: { enabled: false }, force_compact: { enabled: false } }),
   })
-  const forced = await policy.forceCompaction({
-    scheduler: scheduler(),
-    stickyRouter: { resolve: () => HOME },
-    stickyKey: 'sess:x',
-    selected: { ...OTHER, selectionReason: 'balanced' },
-    body: bigBody(),
-    selectArgs: {},
-  })
-  assert.equal(forced, null)
+  const args = reserveArgs('sess:x', bigBody())
+  assert.equal(await policy.compactionReserve(args), null)
+  assert.equal(args.selectArgs.excluded.size, 0)
   assert.equal(
     policy.follow({ stickyRouter: { resolve: () => HOME }, selected: { ...OTHER, selectionReason: 'balanced' } }),
     false,
