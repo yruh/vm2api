@@ -17,14 +17,16 @@ server stays on the last good release.
 - **force_compact**: the last `reserve_headroom` (3%) of every account's 5h/7d budget is kept
   for compaction turns. Once an account is down to it, other requests stop going there
   (they move to another account, or fail when none is left), and a large session pinned
-  there gets `prompt is too long: N tokens > M maximum` once; Claude Code compacts. The
+  there gets `prompt is too long: N tokens > M maximum` on every large turn until it has
+  compacted there; Claude Code compacts. Until then its pin stays on that home: small side
+  requests of the session (subagents, titles) borrow another account without moving it. The
   compaction request goes back to the warm home VM and is paid from the reserve.
   Claude Code answers that error with a compaction that keeps the running turn verbatim, so
   mid-turn (the request carries tool results) an Anthropic client gets a 200 assistant reply
   opening with `[vm2api:compact]` instead: the turn ends, and the `cc-compact-on-pause` mod
-  (or the person) runs `/compact`, which summarizes everything. A session is forced at most
-  once per home within `once_per_home_ms`, and not at all on a home it already compacted on
-  inside the reserve (forced, manual or the client's own).
+  (or the person) runs `/compact`, which summarizes everything. A session that already
+  compacted on a home inside the reserve (forced, manual or the client's own) is not forced
+  there again within `once_per_home_ms`; it moves on.
 - **rehome_after_compact**: after a compaction turn (auto, forced or manual `/compact`), if an
   account that `weekly_reset_first` prefers (higher priority, or 7d reset more than
   `tie_minutes` earlier) is not draining and has at least `min_headroom` budget left, the

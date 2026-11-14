@@ -11,10 +11,12 @@
  * 2. force_compact: the last few percent of every account's 5h/7d budget
  *    (reserve_headroom) are kept for compaction turns. Once an account is down
  *    to that reserve, other requests no longer go to it, and a large session
- *    pinned there is answered "prompt is too long" once so Claude Code
- *    compacts first. The compaction request itself goes back to the home VM,
- *    where the cache is still warm, and is paid from the reserve; only the
- *    short summary moves on. Claude Code answers that error with a compaction
+ *    pinned there is answered "prompt is too long" (every large turn, until it
+ *    has compacted there) so Claude Code compacts first. Until then the pin
+ *    stays on that home: a small side request (subagent, title) served
+ *    elsewhere meanwhile does not move it. The compaction request itself goes
+ *    back to the home VM, where the cache is still warm, and is paid from the
+ *    reserve; only the short summary moves on. Claude Code answers that error with a compaction
  *    that keeps the running turn verbatim, so mid-turn (the request carries
  *    tool results) the turn is ended instead with a short assistant reply
  *    asking for /compact; the cc-compact-on-pause mod runs it.
@@ -43,9 +45,9 @@ export const DEFAULT_CUSTOM_CONFIG = Object.freeze({
     // compaction requests; a single turn can spend more than one percent, so
     // waiting for 99% leaves nothing to compact with.
     reserve_headroom: 0.03,
-    // A session is forced at most once per home within this window, and not
-    // at all on a home it already compacted on inside the reserve (forced,
-    // manual /compact or the client's own auto-compact).
+    // A session that compacted on a home inside the reserve (forced, manual
+    // /compact or the client's own auto-compact) is not forced there again
+    // within this window; it moves on.
     once_per_home_ms: 5 * 60 * 60 * 1000,
     // How long the compaction request may wait for its home VM before it
     // goes through normal selection.
@@ -201,12 +203,22 @@ export class SessionCachePolicy {
     this.compactedAt = new Map()
     /** vmId → last time the reserve log line was written. */
     this.reserveLoggedAt = new Map()
+    /** stickyKey → vmId of a home in the reserve the session has not compacted on yet: its pin stays there. */
+    this.held = new Map()
   }
 
   noteCompaction(stickyKey, vmId, reserved) {
+    this.held.delete(stickyKey)
     this.compactedAt.delete(stickyKey)
     this.compactedAt.set(stickyKey, { at: Date.now(), vmId, reserved: !!reserved })
     if (this.compactedAt.size > 4096) this.compactedAt.delete(this.compactedAt.keys().next().value)
+  }
+
+  /** The session waits for its compaction on this home; nothing served elsewhere may move its pin. */
+  holdsHome(stickyKey, stickyRouter) {
+    const vmId = stickyKey ? this.held.get(stickyKey) : null
+    if (!vmId) return false
+    return stickyRouter?.resolve?.(stickyKey)?.vmId === vmId
   }
 
   inReserve(candidate) {
@@ -291,10 +303,14 @@ export class SessionCachePolicy {
       keyScope: selectArgs.keyScope,
     })
     const reserved = all.filter((candidate) => this.inReserve(candidate))
-    if (!reserved.length) return null
     const home = stickyKey ? stickyRouter?.resolve?.(stickyKey) : null
     const homeCandidate = home?.vmId ? reserved.find((candidate) => candidate.vmId === home.vmId) : null
-    if (homeCandidate) {
+    const holding = !!homeCandidate && !this.compactedInReserve(cfg, stickyKey, home.vmId)
+    if (stickyKey) this.held.delete(stickyKey)
+    if (!reserved.length) return null
+    if (holding) {
+      this.held.set(stickyKey, home.vmId)
+      if (this.held.size > 4096) this.held.delete(this.held.keys().next().value)
       const forced = this.forceOnHome(cfg, stickyKey, homeCandidate, body)
       if (forced) return forced
     }
@@ -311,13 +327,18 @@ export class SessionCachePolicy {
     return null
   }
 
+  compactedInReserve(cfg, stickyKey, vmId) {
+    const compacted = this.compactedAt.get(stickyKey)
+    return !!(
+      compacted &&
+      compacted.reserved &&
+      compacted.vmId === vmId &&
+      Date.now() - compacted.at < Number(cfg.once_per_home_ms || 0)
+    )
+  }
+
   forceOnHome(cfg, stickyKey, home, body) {
     const now = Date.now()
-    const window = Number(cfg.once_per_home_ms || 0)
-    const last = this.forcedAt.get(stickyKey)
-    if (last && last.vmId === home.vmId && now - last.at < window) return null
-    const compacted = this.compactedAt.get(stickyKey)
-    if (compacted && compacted.reserved && compacted.vmId === home.vmId && now - compacted.at < window) return null
     const tokens = estimatePromptTokens(body)
     const minTokens = Math.max(1, Math.floor(Number(cfg.min_prompt_tokens) || 0))
     if (tokens < minTokens) return null
@@ -338,8 +359,9 @@ export class SessionCachePolicy {
   }
 
   /** After a verified hop: re-pin the session (and its device) where it was served. */
-  follow({ stickyRouter, selected, bindKeys = [], deviceKey = null, sessionId = '' }) {
+  follow({ stickyRouter, selected, bindKeys = [], deviceKey = null, sessionId = '', stickyKey = null }) {
     if (!this.config().follow.enabled || !stickyRouter || !selected?.accountId || !selected?.vmId) return false
+    if (this.holdsHome(stickyKey || bindKeys[0], stickyRouter)) return false
     if (!FOLLOW_REASONS.has(selected.selectionReason)) return false
     let moved = false
     for (const key of bindKeys) {
