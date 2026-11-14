@@ -852,6 +852,8 @@ export class FailoverRunner {
       // model, so this request borrows the account. No session, family or
       // device pin follows it; the next turn goes home.
       if (lastSelected?.stickyBorrowed === true && lastSelected.accountId === account.accountId) return
+      // A session waiting to compact on its reserved home keeps its pin there.
+      if (sessionCachePolicy.holdsHome(stickyKey, this.stickyRouter)) opts = { ...opts, borrowed: true }
       const sessionId = account.sessionId || (account.accountId === outboundSessionAccountId ? outboundSessionId : '')
       const payload = { accountId: account.accountId, vmId: account.vmId }
       const slotIndex = account.slotIndex != null ? account.slotIndex : pinnedSlot
@@ -1337,6 +1339,7 @@ export class FailoverRunner {
           sessionCachePolicy.follow({
             stickyRouter: this.stickyRouter,
             selected,
+            stickyKey,
             // A pin another request moved meanwhile is newer than this hop.
             bindKeys: bindKeys.filter((key) => !pinMoved(key)),
             deviceKey,
