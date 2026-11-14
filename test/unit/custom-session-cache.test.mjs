@@ -87,7 +87,7 @@ function attemptMeta(body, selected) {
 
 test('a balanced move off the pinned VM re-pins the session where it was served', async (t) => {
   const { sticky, stickyKey } = setup(t, 'follow')
-  const sched = scheduler()
+  const sched = scheduler({ home: { draining: true, headroom: 0.5 } })
   const runner = new FailoverRunner({ scheduler: sched, stickyRouter: sticky })
   const result = await runner.run({
     requestId: 'follow',
@@ -107,7 +107,7 @@ test('a balanced move off the pinned VM re-pins the session where it was served'
 test('a device-affinity move off the pinned VM re-pins the session too', async (t) => {
   const { sticky, stickyKey } = setup(t, 'device')
   const runner = new FailoverRunner({
-    scheduler: scheduler({ selectionReason: 'device-affinity' }),
+    scheduler: scheduler({ selectionReason: 'device-affinity', home: { draining: true, headroom: 0.5 } }),
     stickyRouter: sticky,
   })
   await runner.run({
@@ -137,16 +137,16 @@ test('a capacity spill keeps the session pinned at home', async (t) => {
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
 })
 
-test('a large session whose home is down to the reserve is told to compact once, then leaves it', async (t) => {
+test('a large session whose home is down to the reserve is told to compact until it does; side requests do not move it', async (t) => {
   const { sticky, stickyKey } = setup(t, 'force')
   const sched = scheduler()
   const runner = new FailoverRunner({ scheduler: sched, stickyRouter: sticky })
   let calls = 0
   let servedOn = null
-  const run = () =>
+  const run = (body = bigBody()) =>
     runner.run({
       requestId: `force-${calls}`,
-      canonicalBody: bigBody(),
+      canonicalBody: body,
       model: 'claude-opus-test',
       stickyKey,
       applyAttempt: attemptMeta,
@@ -163,10 +163,24 @@ test('a large session whose home is down to the reserve is told to compact once,
   assert.equal(calls, 0)
   assert.equal(sched.calls.select.length, 0)
   assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
-  const second = await run()
-  assert.equal(second.ok, true)
+  assert.equal((await run()).status, 400)
+  assert.equal(calls, 0)
+  // A subagent / title request of the same session borrows another account.
+  const side = await run({ model: 'claude-opus-test', messages: [{ role: 'user', content: 'title?' }] })
+  assert.equal(side.ok, true)
   assert.equal(servedOn, 'vm-01')
   assert.ok(sched.calls.select[0].has('vm-04'))
+  assert.equal(sticky.resolve(stickyKey).vmId, 'vm-04')
+  // The compaction turn then still lands on the warm home.
+  servedOn = null
+  const compact = await run(bigBody(COMPACT_TEXT))
+  assert.equal(compact.ok, true)
+  assert.equal(servedOn, 'vm-04')
+  // Compacted inside the reserve: the session is free to move on.
+  const after = await run()
+  assert.equal(after.ok, true)
+  assert.equal(servedOn, 'vm-01')
+  assert.equal(sticky.resolve(stickyKey).vmId, 'vm-01')
 })
 
 test('a healthy home is left without forcing compaction', async (t) => {
@@ -240,7 +254,7 @@ test('inside the reserve small sessions are kept off the account, compaction tur
   assert.equal(compact.selectArgs.excluded.size, 0)
 })
 
-test('a session is forced once per home, then only kept off it; on its next home it is forced again', async () => {
+test('a session is forced on every large turn until it compacts; on its next home it is forced again', async () => {
   const policy = new SessionCachePolicy()
   const realNow = Date.now
   let now = realNow()
@@ -248,6 +262,10 @@ test('a session is forced once per home, then only kept off it; on its next home
   try {
     assert.equal((await policy.compactionReserve(reserveArgs('sess:burn', bigBody()))).status, 400)
     now += 60 * 60 * 1000
+    assert.equal((await policy.compactionReserve(reserveArgs('sess:burn', bigBody()))).status, 400)
+    assert.ok(policy.holdsHome('sess:burn', { resolve: () => HOME }))
+    policy.noteCompaction('sess:burn', 'vm-04', true)
+    assert.ok(!policy.holdsHome('sess:burn', { resolve: () => HOME }))
     const again = reserveArgs('sess:burn', bigBody())
     assert.equal(await policy.compactionReserve(again), null)
     assert.ok(again.selectArgs.excluded.has('vm-04'))
