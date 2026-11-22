@@ -362,6 +362,8 @@ export class SessionCachePolicy {
   follow({ stickyRouter, selected, bindKeys = [], deviceKey = null, sessionId = '', stickyKey = null }) {
     if (!this.config().follow.enabled || !stickyRouter || !selected?.accountId || !selected?.vmId) return false
     if (this.holdsHome(stickyKey || bindKeys[0], stickyRouter)) return false
+    // keep_pin_on_model_gate: a borrowed account never takes the pin.
+    if (selected.stickyBorrowed === true) return false
     if (!FOLLOW_REASONS.has(selected.selectionReason)) return false
     let moved = false
     for (const key of bindKeys) {
